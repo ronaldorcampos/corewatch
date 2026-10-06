@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=corewatch
+GenericName=Hardware monitor
+Comment=Temperatures, fan speeds, voltages, clocks and power in real time
+Exec=corewatch
+Icon=utilities-system-monitor
+Terminal=false
+Categories=System;Monitor;
+Keywords=temperature;sensors;fan;voltage;cpu;gpu;
+StartupWMClass=corewatch

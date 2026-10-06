@@ -1,0 +1,3 @@
+# Let regular users read RAPL energy counters so corewatch can show CPU power draw.
+# Trade-off: see CVE-2020-8694 (PLATYPUS) in the README.
+ACTION=="add", SUBSYSTEM=="powercap", KERNEL=="intel-rapl:*", RUN+="/bin/chmod a+r /sys%p/energy_uj"
