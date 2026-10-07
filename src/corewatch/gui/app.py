@@ -45,6 +45,8 @@ from corewatch.sources import default_sources
 # How long closing waits for a reading in flight before giving up on it.
 SHUTDOWN_WAIT_MS = 3000
 
+# Lines at the top of a pinned icon's menu: name, min, max, average.
+TRAY_INFO_LINES = 4
 # Key of the tray icon shown when no sensor is pinned: the CPU temperature.
 DEFAULT_TRAY = ""
 
@@ -147,6 +149,7 @@ class MainWindow(QMainWindow):
         self.raw_rows: list[Row] = []
         self._tray_factory: Callable[[], QSystemTrayIcon] | None = None
         self._tray_menus: dict[str, QMenu] = {}
+        self._tray_info: dict[str, list[QAction]] = {}
         self.trays: dict[str, QSystemTrayIcon] = {}
         self._quitting = False
 
@@ -659,6 +662,7 @@ class MainWindow(QMainWindow):
             gone.hide()
             gone.deleteLater()
             self._tray_menus.pop(key).deleteLater()
+            self._tray_info.pop(key, None)
             self._tray_states.pop(key, None)
         for key in wanted:
             tray = self.trays.get(key)
@@ -677,6 +681,10 @@ class MainWindow(QMainWindow):
             # Each update is a D-Bus round trip to the tray host, so only send real changes.
             if self._tray_states.get(key) != (text, status, tooltip):
                 self._tray_states[key] = (text, status, tooltip)
+                lines = tooltip.splitlines()
+                for index, action in enumerate(self._tray_info.get(key, [])):
+                    action.setText(lines[index] if index < len(lines) else "")
+                    action.setVisible(index < len(lines))
                 tray.setIcon(number_icon(text, status))
                 tray.setToolTip(tooltip)
             if not tray.isVisible():
@@ -694,6 +702,13 @@ class MainWindow(QMainWindow):
         icon, even after the sensor itself has stopped reporting."""
         menu = QMenu(self)
         if key != DEFAULT_TRAY:
+            # Ubuntu's panel shows no tooltips, so the name, min, max and average are also
+            # listed here, where every tray can show them. Updated with the tooltip.
+            info = [menu.addAction("") for _ in range(TRAY_INFO_LINES)]
+            for action in info:
+                action.setEnabled(False)
+            self._tray_info[key] = info
+            menu.addSeparator()
             unpin = menu.addAction("Unpin this sensor", lambda: self.set_pinned(key, False))
             menu.setProperty("unpin", unpin)
             menu.addSeparator()

@@ -694,12 +694,20 @@ def test_a_vanished_pinned_sensor_can_be_unpinned_from_its_icon(qtbot, settings)
     window.attach_tray(lambda: made.append(FakeTray()) or made[-1])  # type: ignore[arg-type,func-returns-value]
     window.set_pinned("gpu", True)
     menu = made[-1].menu
-    assert menu.actions()[0].text() == "Unpin GPU temperature"
+
+    def unpin():  # type: ignore[no-untyped-def]
+        return next(a for a in menu.actions() if a.text().startswith("Unpin"))
+
+    assert unpin().text() == "Unpin GPU temperature"
     window.refresh()
     assert window._tray_states["gpu"][0] == "?"
     assert "isn't reporting" in made[-1].tooltips[-1]
-    assert menu.actions()[0].text() == "Unpin this sensor"
-    menu.actions()[0].trigger()
+    assert unpin().text() == "Unpin this sensor"
+    assert [a.text() for a in menu.actions()[:4] if a.isVisible()] == [
+        "corewatch",
+        "This pinned sensor isn't reporting right now",
+    ]
+    unpin().trigger()
     assert window.pinned == [] and list(window.trays) == [""]
 
 
@@ -884,3 +892,25 @@ def test_pinned_tray_tooltip_shows_min_max_and_average(qtbot, settings) -> None:
     assert made[-1].tooltips[-1] == "CPU package\nmin: 122.0 °F\nmax: 185.0 °F\naverage: 153.5 °F"
     window.rename_sensor("pkg", "My CPU")
     assert made[-1].tooltips[-1].startswith("My CPU\n")
+
+
+def test_pinned_tray_menu_lists_name_min_max_and_average(qtbot, settings) -> None:  # type: ignore[no-untyped-def]
+    window = make_window(qtbot, settings, SCRIPT)  # CPU package reads 50 °C, then 85 °C
+    made: list[FakeTray] = []
+    window.attach_tray(lambda: made.append(FakeTray()) or made[-1])  # type: ignore[arg-type,func-returns-value]
+    window.set_pinned("pkg", True)
+    window.refresh()
+
+    def texts() -> list[str]:
+        return [a.text() for a in made[-1].menu.actions() if a.isVisible() and not a.isSeparator()]
+
+    assert texts()[:5] == [
+        "CPU package",
+        "min: 50.0 °C",
+        "max: 85.0 °C",
+        "average: 67.5 °C",
+        "Unpin CPU package",
+    ]
+    assert not any(a.isEnabled() for a in made[-1].menu.actions()[:4])  # information, not commands
+    window.set_fahrenheit(True)
+    assert texts()[1] == "min: 122.0 °F"
