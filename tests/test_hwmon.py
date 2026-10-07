@@ -280,3 +280,11 @@ def test_a_negative_rail_keeps_its_real_minimum(tmp_path: Path, proc_root: Path)
     [reading] = source.sample()
     assert (reading.low, reading.high) == (-13.2, -10.8)
     assert reading.status.value == "ok"
+
+
+def test_only_motherboard_fan_headers_may_be_empty(tmp_path: Path, proc_root: Path) -> None:
+    source = make_source(
+        tmp_path, proc_root, {"hwmon9/name": "nct6798", "hwmon9/fan1_input": "0", "hwmon9/pwm1": "100"}
+    )
+    readings = {r.kind: r for r in source.sample()}
+    assert readings[Kind.FAN].empty_if_idle and not readings[Kind.FAN_DUTY].empty_if_idle

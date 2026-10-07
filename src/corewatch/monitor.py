@@ -3,15 +3,26 @@
 import contextlib
 import time
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from corewatch.model import Kind, Reading, Row, Stats, Status
 from corewatch.sources.base import Source
 
 # Within a device, show sensors in this order regardless of which source produced them.
-KIND_ORDER = [Kind.TEMPERATURE, Kind.LOAD, Kind.CLOCK, Kind.POWER, Kind.FAN, Kind.FAN_DUTY, Kind.VOLTAGE, Kind.CURRENT]
+KIND_ORDER = [
+    Kind.TEMPERATURE,
+    Kind.LOAD,
+    Kind.CLOCK,
+    Kind.POWER,
+    Kind.FAN,
+    Kind.FAN_DUTY,
+    Kind.VOLTAGE,
+    Kind.CURRENT,
+    Kind.THROUGHPUT,
+]
 # Devices are listed by these name prefixes; anything else goes last, in discovery order.
-DEVICE_ORDER = ["CPU", "GPU", "Motherboard", "Memory", "NVMe", "Disk", "Network", "Wi-Fi"]
+DEVICE_ORDER = ["CPU", "Fans", "GPU", "Motherboard", "Memory", "NVMe", "Disk", "Network", "Wi-Fi"]
+FANS = "Fans"
 
 
 @dataclass(frozen=True)
@@ -153,7 +164,7 @@ def is_unused(row: Row, by_key: dict[str, Row], unused_keys: set[str], spun_keys
     if reading.status is not Status.OK:
         return False
     if reading.kind is Kind.FAN:
-        return reading.value == 0 and reading.key not in spun_keys
+        return reading.empty_if_idle and reading.value == 0 and reading.key not in spun_keys
     if reading.companion is not None:
         companion = by_key.get(reading.companion)
         return companion is not None and is_unused(companion, by_key, unused_keys, spun_keys)
@@ -167,3 +178,36 @@ def visible_rows(
         return list(rows)
     by_key = {row.reading.key: row for row in rows}
     return [row for row in rows if not is_unused(row, by_key, unused_keys or set(), spun_keys or set())]
+
+
+def gather_fans(rows: Sequence[Row]) -> list[Row]:
+    """Move every fan speed and fan control row into one "Fans" card.
+
+    Labels gain their source where it isn't obvious ("GPU fan 1"); motherboard headers
+    keep their own names. If two devices would still end up with the same label (two
+    motherboard chips both with a "Fan 1"), the device name is added to tell them apart.
+    Keys and statistics are untouched, and ``origin`` keeps the real device.
+    """
+    labels: dict[str, str] = {}
+    devices_by_label: dict[str, set[str]] = {}
+    for row in rows:
+        reading = row.reading
+        if reading.kind not in (Kind.FAN, Kind.FAN_DUTY) or reading.device == FANS:
+            continue
+        source = reading.device.split(" · ")[0]
+        label = reading.label
+        if source != "Motherboard" and not label.startswith(source):
+            label = f"{source} {label[:1].lower()}{label[1:]}"
+        labels[reading.key] = label
+        devices_by_label.setdefault(label, set()).add(reading.device)
+    gathered = []
+    for row in rows:
+        reading = row.reading
+        if reading.key not in labels:
+            gathered.append(row)
+            continue
+        fan_label = labels[reading.key]
+        if len(devices_by_label[fan_label]) > 1:
+            fan_label = f"{fan_label} ({reading.device.split(' · ', 1)[-1]})"
+        gathered.append(Row(replace(reading, device=FANS, label=fan_label, origin=reading.device), row.stats))
+    return gathered

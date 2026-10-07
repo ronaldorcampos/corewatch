@@ -125,13 +125,13 @@ async def test_tui_unused_toggle() -> None:
 
     source = FakeSource(
         "s",
-        [[temp("a", "CPU", 50.0), Reading("fan1", "Motherboard", "Fan 1", Kind.FAN, 0.0)]],
+        [[temp("a", "CPU", 50.0), Reading("fan1", "Motherboard", "Fan 1", Kind.FAN, 0.0, empty_if_idle=True)]],
     )
     app = CorewatchApp(Monitor([source]), interval=60)
     async with app.run_test() as pilot:
         assert [r[0] for r in cell_texts(app.query_one(DataTable))] == ["CPU", "  a"]
         await pilot.press("u")
-        assert [r[0] for r in cell_texts(app.query_one(DataTable))] == ["CPU", "  a", "Motherboard", "  Fan 1"]
+        assert [r[0] for r in cell_texts(app.query_one(DataTable))] == ["CPU", "  a", "Fans", "  Fan 1"]
 
 
 async def test_tui_reset_takes_no_reading_and_cursor_follows_the_sensor() -> None:
@@ -162,7 +162,7 @@ def test_json_marks_unused_rows_and_keeps_the_cap() -> None:
         "s",
         [
             [
-                Reading("fan1", "Motherboard", "Fan 1", Kind.FAN, 0.0),
+                Reading("fan1", "Motherboard", "Fan 1", Kind.FAN, 0.0, empty_if_idle=True),
                 Reading("p", "GPU", "Power", Kind.POWER, 90.0, cap=100.0),
             ]
         ],
@@ -174,3 +174,15 @@ def test_json_marks_unused_rows_and_keeps_the_cap() -> None:
     sensors = {s["key"]: s for s in json.loads(out.getvalue())["sensors"]}
     assert sensors["fan1"]["unused"] is True and sensors["p"]["unused"] is False
     assert sensors["p"]["cap"] == 100.0
+
+
+async def test_tui_gathers_fans_into_one_group() -> None:
+    from corewatch.model import Kind, Reading
+
+    source = FakeSource(
+        "s",
+        [[temp("t", "CPU", 50.0), Reading("g", "GPU · RTX", "Fan 1", Kind.FAN, 2320.0)]],
+    )
+    app = CorewatchApp(Monitor([source]), interval=60)
+    async with app.run_test():
+        assert [r[0] for r in cell_texts(app.query_one(DataTable))] == ["CPU", "  t", "Fans", "  GPU fan 1"]

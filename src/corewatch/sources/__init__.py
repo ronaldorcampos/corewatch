@@ -3,6 +3,7 @@ from collections.abc import Callable
 from corewatch.sources.base import Source
 from corewatch.sources.cpu import CpuSource
 from corewatch.sources.hwmon import HwmonSource
+from corewatch.sources.network import NetworkSource
 from corewatch.sources.nvidia import NvidiaSource
 from corewatch.sources.rapl import RaplSource
 
@@ -14,7 +15,7 @@ def default_sources(factories: list[Callable[[], Source]] | None = None) -> list
     rather than taking the whole app down.
     """
     sources = []
-    for factory in factories or [HwmonSource, CpuSource, RaplSource, NvidiaSource]:
+    for factory in factories or [HwmonSource, CpuSource, RaplSource, NvidiaSource, NetworkSource]:
         try:
             sources.append(factory())
         except Exception:
@@ -22,4 +23,4 @@ def default_sources(factories: list[Callable[[], Source]] | None = None) -> list
     return sources
 
 
-__all__ = ["CpuSource", "HwmonSource", "NvidiaSource", "RaplSource", "Source", "default_sources"]
+__all__ = ["CpuSource", "HwmonSource", "NetworkSource", "NvidiaSource", "RaplSource", "Source", "default_sources"]

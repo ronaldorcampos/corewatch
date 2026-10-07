@@ -1,17 +1,21 @@
 """Desktop window and tray icon built on Qt (PySide6)."""
 
 import contextlib
+import json
 import math
 import os
 import sys
 import time
+from collections.abc import Callable
+from dataclasses import replace
 
-from PySide6.QtCore import QByteArray, QObject, QSettings, Qt, QThread, QTimer, Signal, Slot
+from PySide6.QtCore import QByteArray, QObject, QPoint, QSettings, Qt, QThread, QTimer, Signal, Slot
 from PySide6.QtGui import QAction, QActionGroup, QCloseEvent, QColor, QFont, QGuiApplication, QIcon, QPainter, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
     QButtonGroup,
     QComboBox,
+    QInputDialog,
     QLabel,
     QLineEdit,
     QMainWindow,
@@ -31,12 +35,15 @@ from corewatch.cli import MAX_INTERVAL, MIN_INTERVAL
 from corewatch.gui import theme as themes
 from corewatch.gui.sensors import CategorySection
 from corewatch.gui.widgets import DetailPanel
-from corewatch.model import Kind, Row, Status, format_value
-from corewatch.monitor import Collected, Monitor, group_rows, headline
+from corewatch.model import Kind, Row, Status, format_short, format_value
+from corewatch.monitor import Collected, Monitor, gather_fans, group_rows, headline
 from corewatch.sources import default_sources
 
 # How long closing waits for a reading in flight before giving up on it.
 SHUTDOWN_WAIT_MS = 3000
+
+# Key of the tray icon shown when no sensor is pinned: the CPU temperature.
+DEFAULT_TRAY = ""
 
 INTERVAL_PRESETS = (0.25, 0.5, 1.0, 2.0, 5.0, 10.0, 30.0, 60.0)
 
@@ -47,8 +54,8 @@ THEMES = {
 }
 
 
-def temperature_icon(celsius: float | None, status: Status, fahrenheit: bool) -> QIcon:
-    """A tray icon showing the temperature as a number, like Core Temp does."""
+def number_icon(text: str, status: Status) -> QIcon:
+    """A tray icon showing a number, like Core Temp does, coloured by status."""
     pixmap = QPixmap(64, 64)
     pixmap.fill(Qt.GlobalColor.transparent)
     painter = QPainter(pixmap)
@@ -57,15 +64,18 @@ def temperature_icon(celsius: float | None, status: Status, fahrenheit: bool) ->
     painter.setBrush(QColor(background))
     painter.setPen(Qt.PenStyle.NoPen)
     painter.drawRoundedRect(0, 0, 64, 64, 14, 14)
-    text = "?" if celsius is None else f"{(celsius * 9 / 5 + 32) if fahrenheit else celsius:.0f}"
     font = QFont()
     font.setBold(True)
-    font.setPixelSize(40 if len(text) <= 2 else 28)
+    font.setPixelSize({1: 40, 2: 40, 3: 30, 4: 23}.get(len(text), 19))
     painter.setFont(font)
     painter.setPen(QColor("white"))
     painter.drawText(pixmap.rect(), Qt.AlignmentFlag.AlignCenter, text)
     painter.end()
     return QIcon(pixmap)
+
+
+def temperature_icon(celsius: float | None, status: Status, fahrenheit: bool) -> QIcon:
+    return number_icon(format_short(Kind.TEMPERATURE, celsius, fahrenheit), status)
 
 
 def matches(text: str, *fields: str) -> bool:
@@ -118,14 +128,20 @@ class MainWindow(QMainWindow):
         collapsed = settings.value("collapsed", [], type=list)
         self.collapsed: set[str] = {str(d) for d in collapsed} if isinstance(collapsed, list) else set()
         self.selected_key: str | None = str(settings.value("selected", "")) or None
+        self.pinned: list[str] = self._load_list("pinned")
+        self.names: dict[str, str] = self._load_names()
 
         self.rows: dict[str, Row] = {}
         self.ordered: list[Row] = []
         self.all_rows: list[Row] = []
+        self.plain_ordered: list[Row] = []
         self._devices: list[str] = []
         self.sections: dict[str, CategorySection] = {}
         self.gap = 5.0
-        self.tray: QSystemTrayIcon | None = None
+        self.raw_rows: list[Row] = []
+        self._tray_factory: Callable[[], QSystemTrayIcon] | None = None
+        self._tray_menus: dict[str, QMenu] = {}
+        self.trays: dict[str, QSystemTrayIcon] = {}
         self._quitting = False
 
         self.setWindowTitle("corewatch")
@@ -135,7 +151,7 @@ class MainWindow(QMainWindow):
         self._sampling = False
         self._stopped = False
         self.worker_stuck = False
-        self._tray_state: tuple[str, Status, str] | None = None
+        self._tray_states: dict[str, tuple[str, Status, str]] = {}
         self._build_ui()
         self.apply_theme(self.theme)
         geometry = settings.value("geometry")
@@ -284,6 +300,7 @@ class MainWindow(QMainWindow):
 
         self.detail = DetailPanel()
         self.detail.window_changed.connect(lambda seconds: self._show_detail())
+        self.detail.pin_toggled.connect(lambda pinned: self.set_pinned(self.selected_key, pinned))
         stored_window = self.settings.value("detail_window", 300.0)
         with contextlib.suppress(ValueError):
             self.detail.set_window(self.detail.nearest_window(float(str(stored_window))))
@@ -315,6 +332,7 @@ class MainWindow(QMainWindow):
         self.show_unused = show
         self.settings.setValue("show_unused", show)
         self.ordered = self.monitor.visible_rows(self.all_rows, show)
+        self.plain_ordered = self.monitor.visible_rows(gather_fans(self.raw_rows), show)
         self.redraw()
 
     def set_show_min_max(self, show: bool) -> None:
@@ -396,11 +414,16 @@ class MainWindow(QMainWindow):
             return
         self.show_rows(self.monitor.sample())
 
-    def show_rows(self, rows: list[Row]) -> None:
+    def show_rows(self, raw: list[Row]) -> None:
+        self.raw_rows = raw
+        rows = self._present(raw)
         self.rows.clear()
         self.rows.update({row.reading.key: row for row in rows})
         self.all_rows = rows
         self.ordered = self.monitor.visible_rows(rows, self.show_unused)
+        # The same rows under their original names: what headline() and the tray summary look
+        # for ("CPU package", "CPU load") must not depend on what you've renamed them to.
+        self.plain_ordered = self.monitor.visible_rows(gather_fans(raw), self.show_unused)
         notes = self.monitor.notes()
         self.notes.setText("\n".join(f"•  {note}" for note in notes))
         self.notes.setVisible(bool(notes))
@@ -433,7 +456,7 @@ class MainWindow(QMainWindow):
                 section.set_collapsed(device in self.collapsed)
             section.set_rows(rows, now, self.fahrenheit, self.gap)
         if self.selected_key not in {row.reading.key for row in self.ordered}:  # gone, or now hidden
-            best = headline(self.ordered)
+            best = headline(self.plain_ordered)
             self.selected_key = best.reading.key if best else next(iter(self.rows), None)
         for section in self.sections.values():
             section.grid.set_selected(self.selected_key)
@@ -451,6 +474,7 @@ class MainWindow(QMainWindow):
                 section = CategorySection(device, device in self.collapsed)
                 section.collapse_toggled.connect(self._on_fold)
                 section.grid.selected.connect(self._select)
+                section.grid.context_requested.connect(self._show_sensor_menu)
                 section.grid.set_show_min_max(self.show_min_max)
                 self.sections[device] = section
             self.sections_layout.insertWidget(index, section)
@@ -471,7 +495,9 @@ class MainWindow(QMainWindow):
     def _show_detail(self) -> None:
         row = self.rows.get(self.selected_key) if self.selected_key else None
         now = self.monitor.last_sample_at or self.monitor.clock()
-        self.detail.show_row(row, now, self.fahrenheit, self.gap, self.monitor.to_wall)
+        pinned = self.selected_key in self.pinned
+        can_pin = self._tray_factory is not None
+        self.detail.show_row(row, now, self.fahrenheit, self.gap, self.monitor.to_wall, pinned, can_pin)
 
     # ----- tray & lifecycle -----------------------------------------------------------
 
@@ -480,7 +506,7 @@ class MainWindow(QMainWindow):
             return next(
                 (
                     r
-                    for r in self.ordered
+                    for r in self.plain_ordered
                     if r.reading.device.startswith(device_prefix)
                     and r.reading.kind is kind
                     and r.reading.label.startswith(label_prefix)
@@ -490,7 +516,7 @@ class MainWindow(QMainWindow):
 
         lines = []
         for name, temp, load in (
-            ("CPU", headline(self.ordered), first("CPU", Kind.LOAD, "CPU load")),
+            ("CPU", headline(self.plain_ordered), first("CPU", Kind.LOAD, "CPU load")),
             ("GPU", first("GPU", Kind.TEMPERATURE), first("GPU", Kind.LOAD, "GPU load")),
         ):
             if temp is None:
@@ -501,35 +527,157 @@ class MainWindow(QMainWindow):
             lines.append(line)
         return lines
 
-    def _update_tray(self) -> None:
-        if self.tray is None:
-            return
-        best = headline(self.ordered)
-        reading = best.reading if best else None
-        celsius = reading.value if reading else None
-        status = reading.status if reading else Status.OK
-        tooltip = "\n".join(["corewatch", *self._summary()])
-        number = "?" if celsius is None else f"{(celsius * 9 / 5 + 32) if self.fahrenheit else celsius:.0f}"
-        # Each update is a D-Bus round trip to the tray host, so only send real changes.
-        if (number, status, tooltip) == self._tray_state:
-            return
-        self._tray_state = (number, status, tooltip)
-        self.tray.setIcon(temperature_icon(celsius, status, self.fahrenheit))
-        self.tray.setToolTip(tooltip)
+    def _tray_content(self, key: str) -> tuple[str, Status, str]:
+        """(number on the icon, status, tooltip) for one tray icon."""
+        if key == DEFAULT_TRAY:
+            best = headline(self.plain_ordered)
+            reading = best.reading if best else None
+            text = format_short(Kind.TEMPERATURE, reading.value if reading else None, self.fahrenheit)
+            return text, reading.status if reading else Status.OK, "\n".join(["corewatch", *self._summary()])
+        row = self.rows.get(key)
+        if row is None:  # the sensor went away (driver unloaded, GPU asleep)
+            return "?", Status.OK, "corewatch\nThis pinned sensor isn't reporting right now"
+        reading = row.reading
+        tooltip = f"{reading.label} · {reading.device}\n{format_value(reading.kind, reading.value, self.fahrenheit)}"
+        return format_short(reading.kind, reading.value, self.fahrenheit), reading.status, tooltip
 
-    def attach_tray(self, tray: QSystemTrayIcon) -> None:
-        self.tray = tray
+    def _update_tray(self) -> None:
+        """One icon per pinned sensor (the CPU temperature when nothing is pinned)."""
+        if self._tray_factory is None:
+            return
+        wanted = list(self.pinned) or [DEFAULT_TRAY]
+        for key in [key for key in self.trays if key not in wanted]:
+            gone = self.trays.pop(key)
+            gone.hide()
+            gone.deleteLater()
+            self._tray_menus.pop(key).deleteLater()
+            self._tray_states.pop(key, None)
+        for key in wanted:
+            tray = self.trays.get(key)
+            if tray is None:
+                tray = self.trays[key] = self._tray_factory()
+                menu = self._tray_menus[key] = self._tray_menu_for(key)
+                tray.setContextMenu(menu)
+                tray.activated.connect(
+                    lambda reason: self.toggle_visible() if reason == QSystemTrayIcon.ActivationReason.Trigger else None
+                )
+            text, status, tooltip = self._tray_content(key)
+            unpin = self._tray_menus[key].property("unpin")
+            if isinstance(unpin, QAction):
+                row = self.rows.get(key)
+                unpin.setText(f"Unpin {row.reading.label}" if row else "Unpin this sensor")
+            # Each update is a D-Bus round trip to the tray host, so only send real changes.
+            if self._tray_states.get(key) != (text, status, tooltip):
+                self._tray_states[key] = (text, status, tooltip)
+                tray.setIcon(number_icon(text, status))
+                tray.setToolTip(tooltip)
+            if not tray.isVisible():
+                tray.show()
+
+    def attach_tray(self, factory: Callable[[], QSystemTrayIcon]) -> None:
+        """``factory`` makes one tray icon; it's called once per pinned sensor."""
+        self._tray_factory = factory
+        self._update_tray()
+        self._show_detail()  # pinning is possible now
+
+    def _tray_menu_for(self, key: str) -> QMenu:
+        """Each icon gets its own menu, so a pinned sensor can always be unpinned from its
+        icon, even after the sensor itself has stopped reporting."""
         menu = QMenu(self)
+        if key != DEFAULT_TRAY:
+            unpin = menu.addAction("Unpin this sensor", lambda: self.set_pinned(key, False))
+            menu.setProperty("unpin", unpin)
+            menu.addSeparator()
         menu.addAction("Show / hide window", self.toggle_visible)
         menu.addAction("Reset min/max", self.reset_stats)
         menu.addSeparator()
         menu.addAction("Quit", self.quit)
-        tray.setContextMenu(menu)
-        tray.activated.connect(
-            lambda reason: self.toggle_visible() if reason == QSystemTrayIcon.ActivationReason.Trigger else None
-        )
+        return menu
+
+    def set_pinned(self, key: str | None, pinned: bool) -> None:
+        if key is None or (key in self.pinned) == pinned:
+            return
+        if pinned:
+            self.pinned.append(key)
+        else:
+            self.pinned.remove(key)
+        self.settings.setValue("pinned", json.dumps(self.pinned))
         self._update_tray()
-        tray.show()
+        self._show_detail()
+
+    # ----- per-sensor menu: pin and rename --------------------------------------------
+
+    def sensor_menu(self, key: str) -> QMenu:
+        menu = QMenu(self)
+        pin = menu.addAction("Pin to tray")
+        pin.setCheckable(True)
+        pin.setChecked(key in self.pinned)
+        pin.setEnabled(self._tray_factory is not None)
+        if self._tray_factory is None:
+            pin.setToolTip("No system tray is available")
+        pin.toggled.connect(lambda checked: self.set_pinned(key, checked))
+        menu.addSeparator()
+        menu.addAction("Rename…", lambda: self._rename_interactively(key))
+        reset = menu.addAction("Reset name", lambda: self.rename_sensor(key, None))
+        reset.setEnabled(key in self.names)
+        return menu
+
+    def _show_sensor_menu(self, key: str, position: QPoint) -> None:
+        menu = self.sensor_menu(key)
+        self._popup(menu, position)
+        menu.deleteLater()  # one is built per right-click; don't keep them all
+
+    def _popup(self, menu: QMenu, position: QPoint) -> None:
+        menu.exec(position)
+
+    def _ask_name(self, current: str) -> str | None:
+        text, accepted = QInputDialog.getText(self, "Rename sensor", "Name:", text=current)
+        return text if accepted else None
+
+    def _rename_interactively(self, key: str) -> None:
+        row = self.rows.get(key)
+        name = self._ask_name(row.reading.label if row else "")
+        if name is not None:
+            self.rename_sensor(key, name)
+
+    def rename_sensor(self, key: str, name: str | None) -> None:
+        """Give a sensor your own name; None or an empty name goes back to the original."""
+        name = (name or "").strip()
+        if name:
+            self.names[key] = name
+        else:
+            self.names.pop(key, None)
+        self.settings.setValue("names", json.dumps(self.names, sort_keys=True))
+        if self.raw_rows:
+            self.show_rows(self.raw_rows)  # same readings, new labels; no extra sample
+
+    def _present(self, rows: list[Row]) -> list[Row]:
+        """Rows as shown: every fan in the Fans card, and your own names applied."""
+        presented = gather_fans(rows)
+        if not self.names:
+            return presented
+        return [
+            Row(replace(row.reading, label=self.names[row.reading.key]), row.stats)
+            if row.reading.key in self.names
+            else row
+            for row in presented
+        ]
+
+    def _load_list(self, name: str) -> list[str]:
+        try:
+            stored = json.loads(str(self.settings.value(name, "[]")))
+        except ValueError:
+            return []
+        return [str(item) for item in stored] if isinstance(stored, list) else []
+
+    def _load_names(self) -> dict[str, str]:
+        try:
+            stored = json.loads(str(self.settings.value("names", "{}")))
+        except ValueError:
+            return {}
+        if not isinstance(stored, dict):
+            return {}
+        return {str(key): str(name) for key, name in stored.items() if str(name).strip()}
 
     def toggle_visible(self) -> None:
         if self.isVisible():
@@ -550,8 +698,7 @@ class MainWindow(QMainWindow):
         ending_session = isinstance(app, QGuiApplication) and app.isSavingSession()
         if (
             self.close_to_tray
-            and self.tray is not None
-            and self.tray.isVisible()
+            and any(tray.isVisible() for tray in self.trays.values())
             and not self._quitting
             and not ending_session
         ):
@@ -592,7 +739,7 @@ def run_gui(interval: float | None = None, fahrenheit: bool | None = None) -> in
     window = MainWindow(monitor, QSettings(), interval=interval, fahrenheit=fahrenheit)
     app.aboutToQuit.connect(window.shutdown)
     if QSystemTrayIcon.isSystemTrayAvailable():
-        window.attach_tray(QSystemTrayIcon(window))
+        window.attach_tray(lambda: QSystemTrayIcon(window))
     window.show()
     code = 1
     try:

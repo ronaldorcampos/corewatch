@@ -310,4 +310,5 @@ class HwmonSource:
             crit=info.crit,
             unused=unused,
             companion=info.companion,
+            empty_if_idle=info.kind is Kind.FAN,
         )

@@ -41,6 +41,7 @@ MIN_SPAN = {
     Kind.CURRENT: 0.5,
     Kind.CLOCK: 400.0,
     Kind.LOAD: 10.0,
+    Kind.THROUGHPUT: 50_000.0,
 }
 
 
@@ -49,7 +50,7 @@ def value_range(values: Sequence[float], kind: Kind) -> tuple[float, float]:
     span = max(high - low, MIN_SPAN[kind])
     middle = (low + high) / 2
     low, high = middle - span / 2 * 1.15, middle + span / 2 * 1.15
-    if kind in (Kind.LOAD, Kind.FAN_DUTY, Kind.FAN, Kind.POWER, Kind.CLOCK) and low < 0:
+    if kind in (Kind.LOAD, Kind.FAN_DUTY, Kind.FAN, Kind.POWER, Kind.CLOCK, Kind.THROUGHPUT) and low < 0:
         low, high = 0.0, high - low  # these can't go negative; keep the span
     return low, high
 
@@ -349,6 +350,7 @@ class DetailPanel(QFrame):
     """The lower half of the window: a big chart and every statistic for one sensor."""
 
     window_changed = Signal(float)
+    pin_toggled = Signal(bool)
 
     WINDOWS = ((60.0, "1 min"), (300.0, "5 min"), (900.0, "15 min"))
     STATS = (
@@ -390,12 +392,18 @@ class DetailPanel(QFrame):
         self.subtitle.setObjectName("muted")
         titles.addWidget(self.title)
         titles.addWidget(self.subtitle)
-        header.addLayout(titles)
-        header.addStretch(1)
+        # The titles take all the spare width, so long names aren't clipped.
+        header.addLayout(titles, 1)
         self.value = QLabel("")
         self.value.setObjectName("detailValue")
         header.addWidget(self.value)
         header.addSpacing(16)
+        self.pin_button = QPushButton("Pin to tray")
+        self.pin_button.setCheckable(True)
+        self.pin_button.setToolTip("Show this sensor's value as its own icon in the system tray")
+        self.pin_button.toggled.connect(self._on_pin_toggled)
+        header.addWidget(self.pin_button)
+        header.addSpacing(8)
         self.window_buttons = QButtonGroup(self)
         self.window_buttons.setExclusive(True)
         for seconds, text in self.WINDOWS:
@@ -436,6 +444,10 @@ class DetailPanel(QFrame):
         self.limits.setObjectName("muted")
         layout.addWidget(self.limits)
 
+    def _on_pin_toggled(self, pinned: bool) -> None:
+        self.pin_button.setText("Pinned to tray" if pinned else "Pin to tray")
+        self.pin_toggled.emit(pinned)
+
     @classmethod
     def nearest_window(cls, seconds: float) -> float:
         """Snap any value (say, from a hand-edited settings file) to one of the offered windows."""
@@ -457,9 +469,12 @@ class DetailPanel(QFrame):
         fahrenheit: bool,
         gap: float,
         to_wall: Callable[[float], float] = lambda t: t,
+        pinned: bool = False,
+        can_pin: bool = True,
     ) -> None:
         self.chart.set_data(row, self.window_seconds, fahrenheit, gap, now, to_wall)
         if row is None:
+            self.pin_button.setEnabled(False)
             self.title.setText("No sensor selected")
             self.subtitle.setText("Pick a sensor in the list above")
             self.value.setText("")
@@ -470,8 +485,18 @@ class DetailPanel(QFrame):
         reading, stats = row.reading, row.stats
         kind, f = reading.kind, fahrenheit
         theme = current_theme()
+        self.pin_button.setEnabled(can_pin)
+        self.pin_button.setToolTip(
+            "Show this sensor's value as its own icon in the system tray"
+            if can_pin
+            else "No system tray is available on this desktop"
+        )
+        self.pin_button.blockSignals(True)  # reflecting state, not a click
+        self.pin_button.setChecked(pinned)
+        self.pin_button.setText("Pinned to tray" if pinned else "Pin to tray")
+        self.pin_button.blockSignals(False)
         self.title.setText(reading.label)
-        self.subtitle.setText(reading.device)
+        self.subtitle.setText(reading.origin or reading.device)
         self.value.setText(format_value(kind, reading.value, f))
         color = theme.value_color(reading.status).name()
         if color != self._value_color:  # restyling re-polishes the label; only do it on a change

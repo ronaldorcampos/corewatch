@@ -12,21 +12,30 @@ load and power reading your machine exposes, refreshes them at an interval you c
 
 ## Features
 
-- **One card per device** (CPU, GPU, motherboard, each NVMe drive, network card). Within a card,
-  sensors are grouped under Temperatures, Load, Clocks, Power, Fans and Voltages and laid out in two
-  columns. Each row has a 60-second sparkline, the current value, min, max and average.
+- **One card per device** (CPU, GPU, motherboard, each NVMe drive, network card), plus a **Fans**
+  card that gathers every fan from the motherboard and the GPU (the detail panel still names the
+  device each fan belongs to). Within a card, sensors are grouped under Temperatures, Load, Clocks,
+  Power, Fan speed, Fan control, Voltages and Traffic and laid out in two columns.
+  Each row has a 60-second sparkline, the current value, min, max and average. Click anywhere on a
+  card's header to fold it.
 - **Detail panel** for the selected sensor: a 1, 5 or 15 minute chart with the hardware's limits
   drawn as dashed lines. Hover over the chart to read any point's value and time. Beside the chart:
   lowest and highest (with the time each happened), averages for the session, the last minute and
   the last 5 minutes, variation, trend, and time spent past a limit or at critical.
 - **Readable names.** Intel hybrid CPUs show P-core 0-7 and E-core 0-7 instead of the kernel's
   gappy core IDs. Nuvoton motherboard chips get named voltage rails (Vcore, +12V, +5V, +3.3V, ...).
-- **Noise hidden by default.** Empty fan headers and unconnected temperature probes are hidden
-  (⋯ → Show unused sensors brings them back). A fan that stops after spinning is never hidden, and
-  neither is anything in a warning state.
+  Right-click any sensor and choose **Rename…** to give it your own name (handy for "Fan 2" →
+  "CPU fan"); **Reset name** undoes it.
+- **Pin sensors to the tray.** Right-click a sensor and choose **Pin to tray**, or use the button
+  in the detail panel. Each pinned sensor gets its own tray icon showing its number, like Core
+  Temp's per-core icons. With nothing pinned, one icon shows the CPU temperature. Right-click a
+  pinned icon to unpin it, which also works for a sensor that has stopped reporting (it shows "?").
+- **Noise hidden by default.** Empty motherboard fan headers and unconnected temperature probes are
+  hidden (⋯ → Show unused sensors brings them back). A fan that stops after spinning is never
+  hidden, and neither is anything in a warning state or a GPU fan idling at 0 RPM.
 - **Comfortable to leave open.** Light and dark themes (following the desktop by default), a filter
-  box (Ctrl+F), °C/°F, a Min / max toggle, and a tray icon that shows the CPU temperature as a
-  number. Sensors are read on a background thread, so a slow driver never freezes the window.
+  box (Ctrl+F), °C/°F and a Min / max toggle. Sensors are read on a background thread, so a slow
+  driver never freezes the window.
   Settings are remembered in `~/.config/corewatch/corewatch.conf`.
 - **Terminal view** (`corewatch tui`) for SSH sessions, and a **one-shot dump**
   (`corewatch dump`, or `--json` for scripts).
@@ -38,7 +47,9 @@ load and power reading your machine exposes, refreshes them at an interval you c
 | Kernel hwmon (`/sys/class/hwmon`) | CPU package and per-core temperatures, motherboard temperatures, fans, fan control, voltages, NVMe and network card temperatures, and anything else a driver publishes |
 | `/proc/stat`, cpufreq | Load and clock speed per physical core |
 | RAPL (`/sys/class/powercap`) | CPU package and core power draw (needs one permission tweak, see below) |
-| NVIDIA NVML | GPU temperature, fan speeds, power draw (the power limit is shown for reference, not as a warning), graphics and memory clocks, load, video memory |
+| NVIDIA NVML | GPU temperature, fan speeds (RPM and %), power draw (the power limit is shown for reference, not as a warning), graphics and memory clocks, load, video memory |
+| NVIDIA NvAPI (`libnvidia-api.so.1`) | GPU hotspot and memory (VRAM) temperatures, which NVML doesn't expose. Uses the same driver calls as [LACT](https://github.com/ilya-zlobintsev/LACT); works as a normal user on RTX 20-40 cards |
+| `/sys/class/net` | Download and upload rates for each physical network interface with a link (Docker bridges, loopback and unplugged ports are left out) |
 
 ## Install
 

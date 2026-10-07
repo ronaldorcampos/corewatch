@@ -1,3 +1,4 @@
+import json
 import os
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -142,10 +143,10 @@ def test_number_columns_grow_to_fit_and_never_shrink_mid_session(qtbot, settings
     from corewatch.model import Reading
 
     def fan(rpm: float) -> list[Reading]:
-        return [Reading("f", "Motherboard", "Fan 2", Kind.FAN, rpm)]
+        return [Reading("f", "Motherboard", "Fan 2", Kind.FAN, rpm, empty_if_idle=True)]
 
     window = make_window(qtbot, settings, [fan(900.0), fan(12_345.0), fan(900.0)])
-    grid = window.sections["Motherboard"].grid
+    grid = window.sections["Fans"].grid
     narrow = grid.stat_widths["value"]
     window.refresh()  # 12,345 RPM is wider than 900 RPM
     wide = grid.stat_widths["value"]
@@ -218,7 +219,7 @@ def test_chart_helpers() -> None:
 def test_unused_sensors_hidden_until_toggled(qtbot, settings) -> None:  # type: ignore[no-untyped-def]
     from corewatch.model import Reading
 
-    script = [[temp("t", "CPU · i7", 50.0), Reading("fan1", "Motherboard", "Fan 1", Kind.FAN, 0.0)]]
+    script = [[temp("t", "CPU · i7", 50.0), Reading("fan1", "Motherboard", "Fan 1", Kind.FAN, 0.0, empty_if_idle=True)]]
     window = make_window(qtbot, settings, script)
     assert "fan1" not in visible_keys(window)
     assert "1 unused hidden" in window.statusBar().currentMessage()
@@ -295,6 +296,9 @@ class FakeTray(QObject):
     def setContextMenu(self, menu) -> None:  # type: ignore[no-untyped-def]
         self.menu = menu
 
+    def deleteLater(self) -> None:
+        pass
+
     def setIcon(self, icon) -> None:  # type: ignore[no-untyped-def]
         self.icons += 1
 
@@ -304,14 +308,18 @@ class FakeTray(QObject):
     def show(self) -> None:
         self.visible = True
 
+    def hide(self) -> None:
+        self.visible = False
+
     def isVisible(self) -> bool:
         return self.visible
 
 
 def test_tray_updates_only_when_something_changes(qtbot, settings) -> None:  # type: ignore[no-untyped-def]
     window = make_window(qtbot, settings, [SCRIPT[0]])
-    tray = FakeTray()
-    window.attach_tray(tray)  # type: ignore[arg-type]
+    trays: list[FakeTray] = []
+    window.attach_tray(lambda: trays.append(FakeTray()) or trays[-1])  # type: ignore[arg-type,func-returns-value]
+    [tray] = trays
     assert tray.icons == 1 and "CPU 50.0 °C · 5% load" in tray.tooltips[-1]
     window.refresh()
     window.refresh()
@@ -324,8 +332,7 @@ def test_close_to_tray_hides_and_quit_really_closes(qtbot, settings, monkeypatch
     from PySide6.QtWidgets import QApplication
 
     window = make_window(qtbot, settings, SCRIPT)
-    tray = FakeTray()
-    window.attach_tray(tray)  # type: ignore[arg-type]
+    window.attach_tray(FakeTray)  # type: ignore[arg-type]
     window.tray_action.setChecked(True)
     window.show()
     monkeypatch.setattr(QApplication, "quit", lambda *a: None)
@@ -343,7 +350,7 @@ def test_close_to_tray_steps_aside_when_the_session_ends(qtbot, settings, monkey
     from PySide6.QtWidgets import QApplication
 
     window = make_window(qtbot, settings, SCRIPT)
-    window.attach_tray(FakeTray())  # type: ignore[arg-type]
+    window.attach_tray(FakeTray)  # type: ignore[arg-type]
     window.tray_action.setChecked(True)
     window.show()
     monkeypatch.setattr(QApplication, "quit", lambda *a: None)
@@ -560,7 +567,10 @@ def test_selection_moves_off_a_sensor_that_becomes_hidden(qtbot, settings) -> No
     from corewatch.model import Reading
 
     script = [
-        [temp("t", "CPU · i7", 50.0, label="CPU package"), Reading("fan1", "Motherboard", "Fan 1", Kind.FAN, 0.0)]
+        [
+            temp("t", "CPU · i7", 50.0, label="CPU package"),
+            Reading("fan1", "Motherboard", "Fan 1", Kind.FAN, 0.0, empty_if_idle=True),
+        ]
     ]
     window = make_window(qtbot, settings, script)
     window.unused_action.setChecked(True)
@@ -568,3 +578,179 @@ def test_selection_moves_off_a_sensor_that_becomes_hidden(qtbot, settings) -> No
     window.unused_action.setChecked(False)
     assert window.selected_key == "t"
     assert window.detail.title.text() == "CPU package"
+
+
+def test_fans_from_every_device_share_one_card(qtbot, settings) -> None:  # type: ignore[no-untyped-def]
+    from corewatch.model import Reading
+
+    script = [
+        [
+            temp("pkg", "CPU · i7", 50.0, label="CPU package"),
+            Reading("mb-fan", "Motherboard · Z790", "Fan 2", Kind.FAN, 1500.0),
+            Reading("gpu-rpm", "GPU · RTX", "Fan 1", Kind.FAN, 2320.0),
+            Reading("gpu-pct", "GPU · RTX", "Fan 1 speed", Kind.FAN_DUTY, 72.0),
+            temp("gpu", "GPU · RTX", 41.0, label="GPU temperature"),
+        ]
+    ]
+    window = make_window(qtbot, settings, script)
+    assert list(window.sections) == ["CPU · i7", "Fans", "GPU · RTX"]
+    labels = {c.key: texts(window, c.key)[0] for c in window.sections["Fans"].grid.cells()}
+    assert labels == {"mb-fan": "Fan 2", "gpu-rpm": "GPU fan 1", "gpu-pct": "GPU fan 1 speed"}
+    assert [c.key for c in window.sections["GPU · RTX"].grid.cells()] == ["gpu"]
+
+
+def test_rename_and_reset_a_sensor(qtbot, settings) -> None:  # type: ignore[no-untyped-def]
+    window = make_window(qtbot, settings, SCRIPT)
+    calls = window.monitor.sources[0].calls
+    window._ask_name = lambda current: "  Package (renamed)  "  # type: ignore[method-assign]
+    window.sensor_menu("pkg").actions()[2].trigger()  # Rename…
+    assert texts(window, "pkg")[0] == "Package (renamed)"
+    assert window.detail.title.text() == "Package (renamed)"
+    assert window.monitor.sources[0].calls == calls  # relabelled without a new reading
+    reopened = make_window(qtbot, settings, SCRIPT)
+    assert texts(reopened, "pkg")[0] == "Package (renamed)"
+    menu = window.sensor_menu("pkg")
+    assert menu.actions()[3].isEnabled()  # Reset name
+    menu.actions()[3].trigger()
+    assert texts(window, "pkg")[0] == "CPU package"
+    window._ask_name = lambda current: None  # type: ignore[method-assign]  # dialog cancelled
+    window.sensor_menu("pkg").actions()[2].trigger()
+    assert texts(window, "pkg")[0] == "CPU package"
+
+
+def test_pinned_sensors_get_their_own_tray_icons(qtbot, settings) -> None:  # type: ignore[no-untyped-def]
+    window = make_window(qtbot, settings, SCRIPT)
+    made: list[FakeTray] = []
+    window.attach_tray(lambda: made.append(FakeTray()) or made[-1])  # type: ignore[arg-type,func-returns-value]
+    assert list(window.trays) == [""]  # nothing pinned: the CPU temperature icon
+    window.sensor_menu("gpu").actions()[0].trigger()  # Pin to tray
+    window.set_pinned("cpu-load", True)
+    assert list(window.trays) == ["gpu", "cpu-load"]
+    assert not made[0].visible  # the default icon steps aside once something is pinned
+    assert made[1].tooltips[-1] == "GPU temperature · GPU · RTX\n41.0 °C"
+    assert window._tray_states["cpu-load"][0] == "5"
+    window._select("gpu")
+    assert window.detail.pin_button.isChecked()
+    window.detail.pin_button.click()  # unpin from the detail panel
+    assert list(window.trays) == ["cpu-load"]
+    assert json.loads(settings.value("pinned")) == ["cpu-load"]
+    reopened = make_window(qtbot, settings, SCRIPT)
+    reopened.attach_tray(FakeTray)  # type: ignore[arg-type]
+    assert list(reopened.trays) == ["cpu-load"]
+
+
+def test_pin_is_disabled_without_a_system_tray(qtbot, settings) -> None:  # type: ignore[no-untyped-def]
+    window = make_window(qtbot, settings, SCRIPT)
+    assert not window.sensor_menu("pkg").actions()[0].isEnabled()
+
+
+def test_clicking_anywhere_on_a_card_header_folds_it(qtbot, settings) -> None:  # type: ignore[no-untyped-def]
+    window = make_window(qtbot, settings, SCRIPT)
+    window.resize(1200, 900)
+    window.show()
+    section = window.sections["GPU · RTX"]
+    title = section.title
+    qtbot.mouseClick(title, Qt.MouseButton.LeftButton)
+    assert section.collapsed and settings.value("collapsed", type=list) == ["GPU · RTX"]
+    empty_space = QPoint(section.header.width() // 2, section.header.height() // 2)
+    qtbot.mouseClick(section.header, Qt.MouseButton.LeftButton, pos=empty_space)
+    assert not section.collapsed
+    section.chevron.click()  # the chevron still works, and only toggles once
+    assert section.collapsed
+
+
+def test_short_tray_numbers() -> None:
+    from corewatch.model import format_short
+
+    assert format_short(Kind.TEMPERATURE, 47.4) == "47"
+    assert format_short(Kind.TEMPERATURE, 100.0, fahrenheit=True) == "212"
+    assert format_short(Kind.FAN, 2320.0) == "2.3k" and format_short(Kind.FAN, 850.0) == "850"
+    assert format_short(Kind.CLOCK, 4800.0) == "4.8"
+    assert format_short(Kind.VOLTAGE, 1.184) == "1.18" and format_short(Kind.VOLTAGE, 12.0) == "12.0"
+    assert format_short(Kind.THROUGHPUT, 953_900.0) == "954K" and format_short(Kind.THROUGHPUT, 1_200_000.0) == "1.2M"
+    assert format_short(Kind.LOAD, None) == "?"
+
+
+def test_renaming_never_changes_what_the_tray_and_summary_track(qtbot, settings) -> None:  # type: ignore[no-untyped-def]
+    script = [
+        [
+            temp("pkg", "CPU · i7", 50.0, label="CPU package"),
+            temp("core", "CPU · i7", 70.0, label="P-core 0"),
+            load("cpu-load", "CPU · i7", 5.0, label="CPU load (all cores)"),
+        ]
+    ]
+    window = make_window(qtbot, settings, script)
+    window.attach_tray(FakeTray)  # type: ignore[arg-type]
+    window.rename_sensor("pkg", "My CPU")
+    window.rename_sensor("cpu-load", "Busy")
+    assert window._tray_states[""][0] == "50"  # still the package, not the hottest core
+    assert window._summary() == ["CPU 50.0 °C · 5% load"]
+
+
+def test_a_vanished_pinned_sensor_can_be_unpinned_from_its_icon(qtbot, settings) -> None:  # type: ignore[no-untyped-def]
+    script = [SCRIPT[0], [temp("pkg", "CPU · i7", 50.0, label="CPU package")]]  # "gpu" stops reporting
+    window = make_window(qtbot, settings, script)
+    made: list[FakeTray] = []
+    window.attach_tray(lambda: made.append(FakeTray()) or made[-1])  # type: ignore[arg-type,func-returns-value]
+    window.set_pinned("gpu", True)
+    menu = made[-1].menu
+    assert menu.actions()[0].text() == "Unpin GPU temperature"
+    window.refresh()
+    assert window._tray_states["gpu"][0] == "?"
+    assert "isn't reporting" in made[-1].tooltips[-1]
+    assert menu.actions()[0].text() == "Unpin this sensor"
+    menu.actions()[0].trigger()
+    assert window.pinned == [] and list(window.trays) == [""]
+
+
+def test_tray_icons_and_menus_are_freed_when_unpinned(qtbot, settings) -> None:  # type: ignore[no-untyped-def]
+    from PySide6.QtWidgets import QMenu
+
+    window = make_window(qtbot, settings, SCRIPT)
+
+    class QtTray(FakeTray):
+        pass
+
+    window.attach_tray(lambda: QtTray())  # type: ignore[arg-type]
+    for _ in range(3):
+        window.set_pinned("gpu", True)
+        window.set_pinned("gpu", False)
+    QApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+    assert len(window.findChildren(QMenu)) <= 3  # the ⋯ menu, its Theme submenu, one tray menu
+
+
+def test_right_click_opens_the_sensor_menu_and_frees_it(qtbot, settings) -> None:  # type: ignore[no-untyped-def]
+    from PySide6.QtGui import QContextMenuEvent
+    from PySide6.QtWidgets import QMenu
+
+    window = make_window(qtbot, settings, SCRIPT)
+    window.resize(1200, 900)
+    window.show()
+    shown = []
+    # Record the menu instead of opening it: a real popup would wait for a click.
+    window._popup = lambda menu, pos: shown.append([a.text() for a in menu.actions()])  # type: ignore[method-assign]
+    grid = window.sections["GPU · RTX"].grid
+    before = len(window.findChildren(QMenu))
+    for _ in range(4):
+        point = grid.cells()[0].rect.center()
+        QApplication.sendEvent(grid, QContextMenuEvent(QContextMenuEvent.Reason.Mouse, point, grid.mapToGlobal(point)))
+    QApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+    assert shown[0][0] == "Pin to tray" and "Rename…" in shown[0]
+    assert window.selected_key == "gpu"  # right-click also selects
+    assert len(window.findChildren(QMenu)) == before
+
+
+def test_detail_pin_button_is_disabled_without_a_tray(qtbot, settings) -> None:  # type: ignore[no-untyped-def]
+    window = make_window(qtbot, settings, SCRIPT)
+    assert not window.detail.pin_button.isEnabled()
+    window.attach_tray(FakeTray)  # type: ignore[arg-type]
+    assert window.detail.pin_button.isEnabled()
+
+
+def test_detail_subtitle_shows_the_fans_real_device(qtbot, settings) -> None:  # type: ignore[no-untyped-def]
+    from corewatch.model import Reading
+
+    script = [[Reading("g", "GPU · RTX", "Fan 1", Kind.FAN, 2320.0)]]
+    window = make_window(qtbot, settings, script)
+    window._select("g")
+    assert window.detail.subtitle.text() == "GPU · RTX"

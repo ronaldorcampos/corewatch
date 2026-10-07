@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from PySide6.QtCore import QEvent, QPoint, QPointF, QRect, QRectF, QSize, Qt, Signal
 from PySide6.QtGui import (
     QColor,
+    QContextMenuEvent,
     QFont,
     QFontMetrics,
     QHelpEvent,
@@ -40,10 +41,11 @@ KIND_TITLES = {
     Kind.LOAD: "Load",
     Kind.CLOCK: "Clocks",
     Kind.POWER: "Power",
-    Kind.FAN: "Fans",
+    Kind.FAN: "Fan speed",
     Kind.FAN_DUTY: "Fan control",
     Kind.VOLTAGE: "Voltages",
     Kind.CURRENT: "Current",
+    Kind.THROUGHPUT: "Traffic",
 }
 
 # Cell geometry, in pixels. The label takes whatever width is left.
@@ -129,6 +131,7 @@ class SensorGrid(QWidget):
     """Paints a device's sensors as a grid of cells, grouped under one heading per kind."""
 
     selected = Signal(str)
+    context_requested = Signal(str, QPoint)  # sensor key, global position
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -358,6 +361,12 @@ class SensorGrid(QWidget):
         if key is not None and event.button() == Qt.MouseButton.LeftButton:
             self.selected.emit(key)
 
+    def contextMenuEvent(self, event: QContextMenuEvent) -> None:
+        key = self.key_at(event.pos())
+        if key is not None:
+            self.selected.emit(key)
+            self.context_requested.emit(key, event.globalPos())
+
     def mouseMoveEvent(self, event: QMouseEvent) -> None:
         key = self.key_at(event.position().toPoint())
         if key != self._hover:
@@ -396,7 +405,13 @@ class CategorySection(QFrame):
         layout.setContentsMargins(14, 10, 14, 10)
         layout.setSpacing(6)
 
-        header = QHBoxLayout()
+        # The whole header row folds the card, not just the chevron.
+        self.header = QWidget()
+        self.header.setObjectName("cardHeader")
+        self.header.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.header.setToolTip("Click to fold or unfold")
+        header = QHBoxLayout(self.header)
+        header.setContentsMargins(0, 0, 0, 0)
         header.setSpacing(8)
         self.chevron = QToolButton()
         self.chevron.setObjectName("chevron")
@@ -410,7 +425,7 @@ class CategorySection(QFrame):
         self.count.setObjectName("muted")
         header.addWidget(self.count)
         header.addStretch(1)
-        layout.addLayout(header)
+        layout.addWidget(self.header)
 
         self.grid = SensorGrid()
         layout.addWidget(self.grid)
@@ -428,6 +443,9 @@ class CategorySection(QFrame):
         self.count.setText(f"{len(rows)} sensor{'s' if len(rows) != 1 else ''}")
         self.grid.set_rows(rows, now, fahrenheit, gap)
 
-    def mouseDoubleClickEvent(self, event: QMouseEvent) -> None:
-        if event.position().y() < self.grid.y():  # double-click the header to fold the card
+    def mouseReleaseEvent(self, event: QMouseEvent) -> None:
+        # Clicks on the header's labels and empty space land here; the chevron handles its own.
+        if event.button() == Qt.MouseButton.LeftButton and self.header.geometry().contains(event.position().toPoint()):
             self.set_collapsed(not self.collapsed, user=True)
+            return
+        super().mouseReleaseEvent(event)

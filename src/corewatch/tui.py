@@ -9,7 +9,7 @@ from textual.timer import Timer
 from textual.widgets import DataTable, Footer, Header, Static
 
 from corewatch.model import Row, Status, format_limit, format_value
-from corewatch.monitor import Monitor, group_rows
+from corewatch.monitor import Monitor, gather_fans, group_rows
 
 INTERVAL_STEPS = [0.25, 0.5, 1.0, 2.0, 5.0, 10.0, 30.0, 60.0]
 COLUMNS = [
@@ -80,7 +80,7 @@ class CorewatchApp(App[None]):
         widget.set_class(not notes, "empty")
 
     def _show(self, rows: list[Row]) -> None:
-        self.render_rows(self.monitor.visible_rows(rows, self.show_unused))
+        self.render_rows(gather_fans(self.monitor.visible_rows(rows, self.show_unused)))
 
     def _cells(self, row: Row) -> dict[str, Text]:
         reading, stats = row.reading, row.stats

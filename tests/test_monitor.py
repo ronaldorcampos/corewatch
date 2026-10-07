@@ -92,10 +92,10 @@ def test_unused_inputs_are_hidden_and_stay_hidden_after_one_glitch() -> None:
     from corewatch.model import Kind, Reading
 
     def fan(rpm: float) -> Reading:
-        return Reading("fan2", "Motherboard", "Fan 2", Kind.FAN, rpm)
+        return Reading("fan2", "Motherboard", "Fan 2", Kind.FAN, rpm, empty_if_idle=True)
 
     def dead_fan() -> Reading:
-        return Reading("fan1", "Motherboard", "Fan 1", Kind.FAN, 0.0)
+        return Reading("fan1", "Motherboard", "Fan 1", Kind.FAN, 0.0, empty_if_idle=True)
 
     def control() -> Reading:
         return Reading("pwm1", "Motherboard", "Fan control 1", Kind.FAN_DUTY, 69.0, companion="fan1")
@@ -157,3 +157,26 @@ def test_a_raising_notes_call_does_not_stop_the_readings() -> None:
     rows = monitor.sample()
     assert [r.reading.key for r in rows] == ["t", "u"]
     assert monitor.notes() == ["hi"]
+
+
+def test_fans_card_keeps_origin_and_tells_same_named_fans_apart() -> None:
+    from corewatch.model import Kind, Reading, Row
+    from corewatch.monitor import gather_fans
+
+    rows = [
+        Row(Reading("a", "Motherboard · IT8689", "Fan 1", Kind.FAN, 900.0)),
+        Row(Reading("b", "Motherboard · IT8689 (2)", "Fan 1", Kind.FAN, 950.0)),
+        Row(Reading("c", "GPU · AMD", "Fan 1", Kind.FAN, 1100.0)),
+        Row(Reading("d", "GPU · RTX 4070", "Fan 1", Kind.FAN, 2300.0)),
+        Row(Reading("e", "Motherboard · IT8689", "Fan 2", Kind.FAN, 800.0)),
+    ]
+    gathered = {r.reading.key: r.reading for r in gather_fans(rows)}
+    assert {k: r.label for k, r in gathered.items()} == {
+        "a": "Fan 1 (IT8689)",
+        "b": "Fan 1 (IT8689 (2))",
+        "c": "GPU fan 1 (AMD)",
+        "d": "GPU fan 1 (RTX 4070)",
+        "e": "Fan 2",  # unique: left alone
+    }
+    assert {r.device for r in gathered.values()} == {"Fans"}
+    assert gathered["d"].origin == "GPU · RTX 4070"

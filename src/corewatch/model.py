@@ -15,9 +15,11 @@ class Kind(Enum):
     CURRENT = "current"
     CLOCK = "clock"
     LOAD = "load"
+    THROUGHPUT = "throughput"  # bytes per second
 
 
 UNITS = {
+    Kind.THROUGHPUT: "B/s",
     Kind.TEMPERATURE: "°C",
     Kind.VOLTAGE: "V",
     Kind.FAN: "RPM",
@@ -29,6 +31,7 @@ UNITS = {
 }
 
 DECIMALS = {
+    Kind.THROUGHPUT: 1,
     Kind.TEMPERATURE: 1,
     Kind.VOLTAGE: 3,
     Kind.FAN: 0,
@@ -69,6 +72,11 @@ class Reading:
     unused: bool = False
     # Key of the sensor this one belongs to (a fan's speed control -> the fan): hidden together.
     companion: str | None = None
+    # A fan header that may have nothing plugged in: hidden while it has never spun. Only
+    # motherboard headers; a GPU's fans are known to exist even when idling at 0 RPM.
+    empty_if_idle: bool = False
+    # The device this reading really comes from, when it's shown in another card (Fans).
+    origin: str | None = None
 
     @property
     def status(self) -> Status:
@@ -102,6 +110,7 @@ STEADY_PER_MINUTE = {
     Kind.CURRENT: 0.05,
     Kind.CLOCK: 50.0,
     Kind.LOAD: 2.0,
+    Kind.THROUGHPUT: 10_000.0,
 }
 
 
@@ -216,10 +225,24 @@ def format_value(kind: Kind, value: float | None, fahrenheit: bool = False) -> s
     """Render a value with its unit, e.g. ``45.0 °C`` or ``1,200 RPM``."""
     if value is None:
         return "—"
+    if kind is Kind.THROUGHPUT:
+        return format_rate(value)
     unit = UNITS[kind]
     if kind is Kind.TEMPERATURE and fahrenheit:
         value, unit = to_fahrenheit(value), "°F"
     return f"{value:,.{DECIMALS[kind]}f} {unit}"
+
+
+def format_rate(bytes_per_second: float, signed: bool = False) -> str:
+    """``0 B/s``, ``12.3 KB/s``, ``4.5 MB/s``: decimal units, like browsers and file managers."""
+    sign = "+" if signed else ""
+    if round(abs(bytes_per_second)) < 1000:
+        return f"{bytes_per_second:{sign}.0f} B/s"
+    # Pick the unit after rounding, so 999,960 B/s reads "1.0 MB/s", not "1000.0 KB/s".
+    for unit, scale in (("KB/s", 1e3), ("MB/s", 1e6)):
+        if round(abs(bytes_per_second) / scale, 1) < 1000:
+            return f"{bytes_per_second / scale:{sign}.1f} {unit}"
+    return f"{bytes_per_second / 1e9:{sign}.1f} GB/s"
 
 
 def format_limit(reading: Reading, fahrenheit: bool = False) -> str:
@@ -242,6 +265,8 @@ def format_delta(kind: Kind, delta: float | None, fahrenheit: bool = False, sign
     """Render a difference (spread, change per minute). °F differences scale but don't shift by 32."""
     if delta is None:
         return "—"
+    if kind is Kind.THROUGHPUT:
+        return format_rate(delta, signed)
     unit = UNITS[kind]
     if kind is Kind.TEMPERATURE and fahrenheit:
         delta, unit = delta * 9 / 5, "°F"
@@ -256,6 +281,8 @@ def format_trend(kind: Kind, per_minute: float | None, fahrenheit: bool = False)
     if abs(per_minute) < STEADY_PER_MINUTE[kind]:
         return "→ steady"
     arrow = "↑" if per_minute > 0 else "↓"
+    if kind is Kind.THROUGHPUT:  # "KB/s/min" is hard to read
+        return f"{arrow} {format_delta(kind, per_minute, fahrenheit)} per min"
     return f"{arrow} {format_delta(kind, per_minute, fahrenheit)}/min"
 
 
@@ -269,3 +296,30 @@ def format_duration(seconds: float) -> str:
         return f"{minutes} min {seconds:02d} s"
     hours, minutes = divmod(minutes, 60)
     return f"{hours} h {minutes:02d} min"
+
+
+def format_short(kind: Kind, value: float | None, fahrenheit: bool = False) -> str:
+    """A number small enough for a tray icon, no unit: ``47``, ``2.3k``, ``4.8`` (GHz), ``1.2M``."""
+    if value is None:
+        return "?"
+    if kind is Kind.TEMPERATURE:
+        return f"{to_fahrenheit(value) if fahrenheit else value:.0f}"
+    if kind is Kind.FAN:
+        return f"{value:.0f}" if round(value) < 1000 else f"{value / 1000:.1f}k"
+    if kind is Kind.CLOCK:
+        return f"{value / 1000:.1f}"  # GHz
+    if kind is Kind.VOLTAGE:
+        return f"{value:.2f}" if abs(value) < 10 else f"{value:.1f}"
+    if kind is Kind.CURRENT:
+        return f"{value:.1f}"
+    if kind is Kind.THROUGHPUT:
+        if round(value) < 1000:
+            return f"{value:.0f}"
+        # Unit chosen after rounding, so 999,600 B/s reads "1.0M", not "1000K".
+        for suffix, scale in (("K", 1e3), ("M", 1e6)):
+            scaled = value / scale
+            if round(scaled) < 1000:
+                return f"{scaled:.1f}{suffix}" if round(scaled, 1) < 10 else f"{scaled:.0f}{suffix}"
+        scaled = value / 1e9
+        return f"{scaled:.1f}G" if round(scaled, 1) < 10 else f"{scaled:.0f}G"
+    return f"{value:.0f}"  # load, fan duty, power
