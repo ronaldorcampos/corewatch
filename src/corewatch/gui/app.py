@@ -45,8 +45,8 @@ from corewatch.sources import default_sources
 # How long closing waits for a reading in flight before giving up on it.
 SHUTDOWN_WAIT_MS = 3000
 
-# Lines at the top of a pinned icon's menu: name, min, max, average.
-TRAY_INFO_LINES = 4
+# Lines at the top of a pinned icon's menu: group, name, min, max, average.
+TRAY_INFO_LINES = 5
 # Key of the tray icon shown when no sensor is pinned: the CPU temperature.
 DEFAULT_TRAY = ""
 
@@ -644,6 +644,7 @@ class MainWindow(QMainWindow):
         # The icon already shows the current value; hovering adds how it has behaved.
         tooltip = "\n".join(
             [
+                reading.device,
                 reading.label,
                 f"min: {shown(stats.minimum)}",
                 f"max: {shown(stats.maximum)}",
@@ -705,6 +706,7 @@ class MainWindow(QMainWindow):
             # Ubuntu's panel shows no tooltips, so the name, min, max and average are also
             # listed here, where every tray can show them. Updated with the tooltip.
             info = [menu.addAction("") for _ in range(TRAY_INFO_LINES)]
+            menu.insertSeparator(info[1])  # between the group and the sensor
             for action in info:
                 action.setEnabled(False)
             self._tray_info[key] = info
