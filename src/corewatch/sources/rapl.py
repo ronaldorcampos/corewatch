@@ -13,9 +13,9 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from corewatch.model import Kind, Reading
-from corewatch.sources.base import cpu_device_name, read_int, read_text
-
-MAX_PLAUSIBLE_WATTS = 2000.0
+from corewatch.sources.base import MAX_PLAUSIBLE_WATTS, cpu_device_name, read_int, read_text
+from corewatch.sources.hwmon import PCI_IDS
+from corewatch.sources.intel_gpu import find_integrated_gpu
 
 ZONE_DIR = re.compile(r"^intel-rapl:\d+(:\d+)?$")
 
@@ -33,6 +33,7 @@ class Zone:
     path: Path
     label: str
     max_range: int | None
+    device: str
     previous: tuple[int, float] | None = None
 
 
@@ -50,8 +51,12 @@ class RaplSource:
         root: Path = Path("/sys/class/powercap"),
         proc_root: Path = Path("/proc"),
         clock: Callable[[], float] = time.monotonic,
+        drm_root: Path = Path("/sys/class/drm"),
+        pci_ids: tuple[Path, ...] = PCI_IDS,
     ) -> None:
         self.device = cpu_device_name(proc_root)
+        # With the integrated GPU switched on, its power belongs on its own card.
+        integrated = find_integrated_gpu(drm_root, pci_ids)
         self.clock = clock
         self.zones: list[Zone] = []
         self.unreadable: list[Path] = []
@@ -70,7 +75,11 @@ class RaplSource:
                 continue
             except OSError:
                 continue
-            self.zones.append(Zone(entry, _label(name), read_int(entry / "max_energy_range_uj")))
+            max_range = read_int(entry / "max_energy_range_uj")
+            if integrated is not None and name == "uncore":
+                self.zones.append(Zone(entry, "Power draw", max_range, integrated.device))
+            else:
+                self.zones.append(Zone(entry, _label(name), max_range, self.device))
         self.sample()  # prime the counters
 
     def sample(self) -> list[Reading]:
@@ -94,7 +103,7 @@ class RaplSource:
             zone.previous = (energy, now) if energy is not None else None
             readings.append(
                 Reading(
-                    key=f"rapl/{zone.path.name}", device=self.device, label=zone.label, kind=Kind.POWER, value=value
+                    key=f"rapl/{zone.path.name}", device=zone.device, label=zone.label, kind=Kind.POWER, value=value
                 )
             )
         return readings

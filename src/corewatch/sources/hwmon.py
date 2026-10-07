@@ -67,7 +67,21 @@ AMDGPU_LABELS = {
     "PPT": "Power draw",
     "slowPPT": "Power draw",  # the Steam Deck's name for the same reading
 }
-GPU_DRIVERS = {"amdgpu", "radeon", "nouveau"}
+# Intel's GPU drivers. Only discrete cards (Arc) get a hwmon chip; integrated graphics has none.
+INTEL_GPU_DRIVERS = {"i915", "xe"}
+GPU_DRIVERS = {"amdgpu", "radeon", "nouveau", *INTEL_GPU_DRIVERS}
+# Labels xe gives its sensors (drivers/gpu/drm/xe/xe_hwmon.c); i915 labels none of them.
+INTEL_GPU_TEMPERATURES = {
+    "pkg": "GPU temperature",
+    "vram": "Memory temperature",
+    "mctrl": "Memory controller temperature",
+    "pcie": "PCIe link temperature",
+}
+INTEL_GPU_POWER = {"card": "Power draw", "pkg": "GPU chip power"}
+INTEL_VRAM_CHANNEL = re.compile(r"^vram_ch_(\d+)$")
+INTEL_VENDOR = "0x8086"
+# Intel always gives its integrated graphics this PCI slot; a discrete Arc card sits elsewhere.
+INTEL_INTEGRATED_SLOT = "0000:00:02.0"
 # zenpower on multi-socket systems prefixes every label: "cpu0 Tdie", "cpu1 SVI2_Core".
 SOCKET_PREFIX = re.compile(r"^cpu(\d+) (.+)$")
 # zenpower (an out-of-tree driver for Zen 1-3) reports the CPU's own voltage regulators.
@@ -113,6 +127,28 @@ def pci_name(vendor: str, device: str, databases: tuple[Path, ...] = PCI_IDS) ->
         name = bracket.group(1)
     _pci_names[cache_key] = name
     return name
+
+
+def intel_gpu_name(pci: Path, databases: tuple[Path, ...] = PCI_IDS) -> str:
+    """One Intel GPU's card name, e.g. "GPU · Intel Arc A770". The hwmon chip and the Intel
+    source both use it, so a discrete card's readings from either land on the same card."""
+    # Newer pci.ids entries already say "Intel Arc Graphics"; don't make it "Intel Intel".
+    model = (pci_name(INTEL_VENDOR, read_text(pci / "device") or "", databases) or "").removeprefix("Intel ")
+    if model:
+        return f"GPU · Intel {model}"
+    integrated = pci.resolve().name == INTEL_INTEGRATED_SLOT
+    return "GPU · Intel integrated graphics" if integrated else "GPU · Intel graphics card"
+
+
+def unused_gpu(pci: Path) -> bool:
+    """Whether nothing is using a GPU: it's powered down, or nobody holds it awake (a program
+    drawing or encoding on it, a lit display) and it's only waiting to power down. These two
+    files never wake it, while reading most of an Intel GPU's own files does, and each read
+    while it's awake restarts its countdown to powering down: read every sample, they would
+    keep it awake for good. When something is using it, it's awake anyway and they're free.
+    Unknown (no runtime power management) counts as in use."""
+    power = pci / "power"
+    return read_text(power / "runtime_status") == "suspended" or read_int(power / "runtime_usage") == 0
 
 
 # Super I/O temperature inputs with nothing attached read one of these.
@@ -164,6 +200,8 @@ class ChipInfo:
     device: str
     channels: list[ChannelInfo]
     read_at: float
+    # Left alone while nothing uses the GPU: reading it would keep it awake (Intel's GPU drivers).
+    sleeps: bool = False
 
 
 # Labels and limits rarely change, and on NVMe drives every read is a command sent to the
@@ -214,14 +252,15 @@ class HwmonSource:
             del self._chips[chip]  # driver unloaded
         for chip in chips:
             info = self._chips.get(chip)
-            if info is None or now - info.read_at >= METADATA_SECONDS:
+            asleep = info is not None and info.sleeps and unused_gpu(chip / "device")
+            if info is None or (now - info.read_at >= METADATA_SECONDS and not asleep):
                 info = self._chips[chip] = self._describe_chip(chip, now)
             if not info.channels:
                 continue
             used_names[info.device] = used_names.get(info.device, 0) + 1
             device = info.device if used_names[info.device] == 1 else f"{info.device} ({used_names[info.device]})"
             for channel in info.channels:
-                readings.append(self._read(chip, device, channel))
+                readings.append(self._read(chip, device, channel, asleep))
         self._found_kinds = {r.kind for r in readings}
         return readings
 
@@ -241,7 +280,7 @@ class HwmonSource:
         channels = [self._describe(chip, chip_id, channel, profile, context) for channel in found]
         if name == "amdgpu":
             channels += self._amdgpu_extras(chip, chip_id)
-        return ChipInfo(device, channels, now)
+        return ChipInfo(device, channels, now, sleeps=name in INTEL_GPU_DRIVERS)
 
     def _amdgpu_extras(self, chip: Path, chip_id: str) -> list[ChannelInfo]:
         """GPU load and VRAM use, which amdgpu publishes next to (not inside) its hwmon folder."""
@@ -346,6 +385,8 @@ class HwmonSource:
             return f"GPU · AMD {model}" if model else "GPU · AMD"
         if name == "nouveau":
             return "GPU · NVIDIA (nouveau)"
+        if name in INTEL_GPU_DRIVERS:
+            return intel_gpu_name(device, self.pci_ids)
         if name in {"spd5118", "jc42"}:
             return "Memory module"
         return name
@@ -418,6 +459,8 @@ class HwmonSource:
             low = fan_min if fan_min else None
         elif kind is Kind.POWER:
             power_cap = limit("cap")
+            if not power_cap and context.name in INTEL_GPU_DRIVERS:
+                power_cap = limit("max")  # Intel's sustained power limit, its equivalent
             cap = power_cap if power_cap else None  # shown for reference, never a warning
         return ChannelInfo(
             key=f"hwmon/{chip_id}/{base}",
@@ -443,6 +486,16 @@ class HwmonSource:
             if kind is Kind.FAN_DUTY:
                 return f"Fan {channel.number} speed"  # like the NVIDIA card's percentage rows
             return AMDGPU_LABELS.get(label, label)
+        if context.name in INTEL_GPU_DRIVERS:
+            if kind is Kind.TEMPERATURE:
+                if vram := INTEL_VRAM_CHANNEL.match(label):
+                    return f"Memory channel {vram.group(1)} temperature"
+                return INTEL_GPU_TEMPERATURES.get(label, label)
+            if kind is Kind.POWER:  # i915 labels nothing: its one power reading is the card's
+                return INTEL_GPU_POWER.get(label, "Power draw" if label.startswith("Power ") else label)
+            if kind is Kind.VOLTAGE:
+                return "Core voltage"  # the GPU's one voltage reading (i915's in0, xe's in1)
+            return label
         if context.name in AMD_CPU_DRIVERS:
             if socket := SOCKET_PREFIX.match(label):
                 inner = self._friendly_label(socket.group(2), kind, channel, context)
@@ -458,8 +511,8 @@ class HwmonSource:
             return ZENPOWER_LABELS.get(label, label)
         return label
 
-    def _read(self, chip: Path, device: str, info: ChannelInfo) -> Reading:
-        raw = read_int(chip / info.value_file)
+    def _read(self, chip: Path, device: str, info: ChannelInfo, asleep: bool = False) -> Reading:
+        raw = None if asleep else read_int(chip / info.value_file)
         value = raw / info.divisor if raw is not None else None
         if info.ratio_of is not None:
             total = read_int(chip / info.ratio_of)

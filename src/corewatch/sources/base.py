@@ -22,6 +22,11 @@ class Source(Protocol):
     def close(self) -> None: ...
 
 
+# Power worked out from an energy counter: a counter reset (driver reload, suspend) looks like
+# a huge jump, and no desktop part draws anywhere near this.
+MAX_PLAUSIBLE_WATTS = 2000.0
+
+
 def read_text(path: Path) -> str | None:
     """Read a small sysfs file, returning None if it is missing or unreadable."""
     try:

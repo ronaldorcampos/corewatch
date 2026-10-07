@@ -201,7 +201,7 @@ def test_corrupt_settings_fall_back_to_defaults(qtbot, settings) -> None:  # typ
     assert (window.interval, window.theme) == (1.0, "system")
 
 
-def test_tray_icon_draws_status_colour() -> None:
+def test_tray_icon_draws_status_colour(qapp) -> None:  # type: ignore[no-untyped-def]
     image = temperature_icon(85.0, Status.CRITICAL, False).pixmap(64, 64).toImage()
     assert isinstance(image, QImage)
     assert image.pixelColor(32, 4).name() == "#dc2626"
@@ -1070,7 +1070,7 @@ def test_clicking_or_double_clicking_any_tray_icon_shows_the_window(qtbot, setti
     assert window.isHidden()
 
 
-def test_the_tray_logo_is_one_colour_to_suit_the_panel() -> None:
+def test_the_tray_logo_is_one_colour_to_suit_the_panel(qapp) -> None:  # type: ignore[no-untyped-def]
     from corewatch.gui.app import TRAY_ICON_SIZES, panel_is_light, tray_icon
 
     def colours(light_panel: bool) -> set[tuple[int, int, int]]:
