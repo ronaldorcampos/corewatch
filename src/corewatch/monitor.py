@@ -139,15 +139,18 @@ def group_rows(rows: Sequence[Row]) -> list[tuple[str, list[Row]]]:
 
 
 def headline(rows: Sequence[Row]) -> Row | None:
-    """The single temperature that best summarises the machine: the CPU package, else the hottest."""
+    """The single temperature that best summarises the machine: the CPU's own reading (Intel's
+    package, AMD's die temperature), else the hottest CPU sensor, else the hottest of all."""
     temps = [r for r in rows if r.reading.kind is Kind.TEMPERATURE and r.reading.value is not None]
-    for row in temps:
-        if row.reading.device.startswith("CPU") and row.reading.label.lower().startswith(
-            ("cpu package", "package", "tctl", "tdie")
-        ):
+    cpu_temps = [r for r in temps if r.reading.device.startswith("CPU")]
+    for wanted in ("cpu package", "cpu temperature"):  # exact names first: not "(fan control)"
+        for row in cpu_temps:
+            if row.reading.label.lower() == wanted:
+                return row
+    for row in cpu_temps:
+        if row.reading.label.lower().startswith(("cpu package", "package", "tdie", "tctl", "cpu temperature")):
             return row
-    cpu = [r for r in temps if r.reading.device.startswith("CPU")]
-    pool = cpu or temps
+    pool = cpu_temps or temps
     return max(pool, key=lambda r: r.reading.value or 0.0) if pool else None
 
 

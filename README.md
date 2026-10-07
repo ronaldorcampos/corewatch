@@ -51,22 +51,27 @@ load and power reading your machine exposes, refreshes them at an interval you c
 
 | Source | What you get |
 |---|---|
-| Kernel hwmon (`/sys/class/hwmon`) | CPU package and per-core temperatures, motherboard temperatures, fans, fan control, voltages, NVMe and network card temperatures, and anything else a driver publishes |
+| Kernel hwmon (`/sys/class/hwmon`) | Intel CPU package and per-core temperatures (`coretemp`), motherboard temperatures, fans, fan control, voltages, NVMe and network card temperatures, and anything else a driver publishes |
+| AMD CPUs (`k10temp`, optional `zenpower`) | CPU temperature (the real die temperature, plus the fan-control value where the chip reports both) and one temperature per chiplet (CCD); AMD reports no per-core temperatures. With `zenpower` (Zen 1-3), core and SoC voltages, currents and power |
+| AMD GPUs (`amdgpu`) | GPU, hotspot and memory temperatures (warning at the throttle point, critical at shutdown), fan speed (RPM and %), core voltage, graphics and memory clocks, power draw against its cap, load and video memory, under the card's model name |
 | `/proc/stat`, cpufreq | Load and clock speed per physical core |
-| RAPL (`/sys/class/powercap`) | CPU package and core power draw (needs one permission tweak, see below) |
+| RAPL (`/sys/class/powercap`) | CPU package and core power draw on Intel and AMD Zen (needs one permission tweak, see below) |
 | NVIDIA NVML | GPU temperature, fan speeds (RPM and %), power draw (the power limit is shown for reference, not as a warning), graphics and memory clocks, load, video memory |
 | NVIDIA NvAPI (`libnvidia-api.so.1`) | GPU hotspot and memory (VRAM) temperatures, which NVML doesn't expose. Uses the same driver calls as [LACT](https://github.com/ilya-zlobintsev/LACT); works as a normal user on RTX 20-40 cards |
 | `/sys/class/net` | Download and upload rates for each physical network interface with a link (Docker bridges, loopback and unplugged ports are left out) |
 
+AMD support follows the kernel drivers' documented behaviour and is covered by tests, but has
+not yet been tried on real AMD hardware. If you have a Ryzen or Radeon, the output of
+`corewatch dump --json --all` in an issue is the most useful thing you can send.
+
 ## Install
 
-You need Linux, [uv](https://docs.astral.sh/uv/), and Python 3.13 (uv fetches it if needed). The
-NVIDIA driver is optional; without it the GPU card simply doesn't appear.
+You need Linux with glibc 2.34 or newer (Ubuntu 22.04, Debian 12, Fedora 35 or later; the Qt
+toolkit's wheels require it), [uv](https://docs.astral.sh/uv/), and Python 3.13 (uv fetches it if
+needed). The NVIDIA driver is optional; without it the GPU card simply doesn't appear.
 
 ```bash
-git clone git@github.com:ronaldorcampos/corewatch.git
-cd corewatch
-uv tool install .
+uv tool install git+https://github.com/ronaldorcampos/corewatch
 ```
 
 That puts `corewatch` in `~/.local/bin`. To add it to your app launcher (GNOME, KDE and others),
@@ -74,17 +79,30 @@ install the desktop entry, pointing it at the full path because launchers don't 
 `~/.local/bin`:
 
 ```bash
-sed "s|^Exec=corewatch$|Exec=$HOME/.local/bin/corewatch|" packaging/corewatch.desktop > ~/.local/share/applications/corewatch.desktop
+curl -fsSL --create-dirs -o ~/.local/share/applications/corewatch.desktop https://raw.githubusercontent.com/ronaldorcampos/corewatch/main/packaging/corewatch.desktop && sed -i "s|^Exec=corewatch\$|Exec=$HOME/.local/bin/corewatch|" ~/.local/share/applications/corewatch.desktop
 ```
 
-`uv tool install` takes a snapshot of the code. After pulling changes, refresh it with:
+To update to the latest version later:
 
 ```bash
-uv tool install --reinstall .
+uv tool install --reinstall git+https://github.com/ronaldorcampos/corewatch
 ```
 
 The tray icon needs a system tray. On GNOME that means the AppIndicator extension, which Ubuntu
 ships enabled.
+
+### From a clone
+
+To work on corewatch, or run your own changes:
+
+```bash
+git clone https://github.com/ronaldorcampos/corewatch.git
+cd corewatch
+uv tool install .
+```
+
+`uv tool install` takes a snapshot of the code; after changing or pulling it, refresh with
+`uv tool install --reinstall .`.
 
 ## Usage
 
@@ -136,8 +154,10 @@ information through a side channel (CVE-2020-8694, "PLATYPUS"). On a personal de
 to make them readable anyway. Install the udev rule, then apply it without rebooting:
 
 ```bash
-sudo cp packaging/99-corewatch-rapl.rules /etc/udev/rules.d/
+curl -fsSL https://raw.githubusercontent.com/ronaldorcampos/corewatch/main/packaging/99-corewatch-rapl.rules | sudo tee /etc/udev/rules.d/99-corewatch-rapl.rules > /dev/null
 ```
+
+(From a clone, `sudo cp packaging/99-corewatch-rapl.rules /etc/udev/rules.d/` does the same.)
 
 ```bash
 sudo udevadm trigger --subsystem-match=powercap --action=add

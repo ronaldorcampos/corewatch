@@ -54,6 +54,67 @@ ASUS_NCT679X_VOLTAGES = {
     4: ("+12V", 12.0),
 }
 
+# amdgpu's driver labels (drivers/gpu/drm/amd/pm/amdgpu_pm.c), named like the NVIDIA card's rows.
+AMDGPU_LABELS = {
+    "edge": "GPU temperature",
+    "junction": "Hotspot temperature",
+    "mem": "Memory temperature",
+    "vddgfx": "Core voltage",
+    "vddnb": "SoC voltage",
+    "sclk": "Graphics clock",
+    "mclk": "Memory clock",
+    "vddboard": "Board voltage",
+    "PPT": "Power draw",
+    "slowPPT": "Power draw",  # the Steam Deck's name for the same reading
+}
+GPU_DRIVERS = {"amdgpu", "radeon", "nouveau"}
+# zenpower on multi-socket systems prefixes every label: "cpu0 Tdie", "cpu1 SVI2_Core".
+SOCKET_PREFIX = re.compile(r"^cpu(\d+) (.+)$")
+# zenpower (an out-of-tree driver for Zen 1-3) reports the CPU's own voltage regulators.
+ZENPOWER_LABELS = {
+    "SVI2_Core": "Core voltage",
+    "SVI2_SoC": "SoC voltage",
+    "SVI2_C_Core": "Core current",
+    "SVI2_C_SoC": "SoC current",
+    "SVI2_P_Core": "Core power",
+    "SVI2_P_SoC": "SoC power",
+}
+AMD_CPU_DRIVERS = {"k10temp", "zenpower"}
+CCD_LABEL = re.compile(r"^Tccd(\d+)$")
+PCI_IDS = (Path("/usr/share/hwdata/pci.ids"), Path("/usr/share/misc/pci.ids"))
+_pci_names: dict[tuple[str, ...], str | None] = {}
+
+
+def pci_name(vendor: str, device: str, databases: tuple[Path, ...] = PCI_IDS) -> str | None:
+    """A PCI device's marketing name from the system's pci.ids, e.g. "Radeon RX 7900 XT/7900
+    XTX" for 1002:744c (the part in brackets, when there is one). Looked up once per device."""
+    wanted = (vendor.lower().removeprefix("0x"), device.lower().removeprefix("0x"))
+    cache_key = (*wanted, *map(str, databases))
+    if cache_key in _pci_names:
+        return _pci_names[cache_key]
+    name = None
+    for database in databases:
+        try:
+            with database.open(encoding="utf-8", errors="replace") as file:
+                in_vendor = False
+                for line in file:
+                    if line.startswith("#") or not line.strip():  # comments sit inside vendor blocks too
+                        continue
+                    if not line.startswith("\t"):
+                        in_vendor = line[:4].lower() == wanted[0]
+                    elif in_vendor and not line.startswith("\t\t") and line[1:5].lower() == wanted[1]:
+                        name = line[5:].strip()
+                        break
+        except OSError:
+            continue
+        if name is not None:
+            break
+    if name is not None and (bracket := re.search(r"\[(.+)\]", name)):
+        name = bracket.group(1)
+    _pci_names[cache_key] = name
+    return name
+
+
 # Super I/O temperature inputs with nothing attached read one of these.
 UNCONNECTED_TEMPS = {127.0, -128.0, 0.0}
 
@@ -82,6 +143,20 @@ class ChannelInfo:
     high: float | None
     crit: float | None
     companion: str | None
+    cap: float | None = None
+    # When set, the value is value_file as a percentage of this file (VRAM used of total).
+    ratio_of: str | None = None
+    empty_if_idle: bool = False
+
+
+@dataclass(frozen=True)
+class ChipContext:
+    """What a channel's naming may depend on, beyond its own files."""
+
+    name: str = ""
+    gpu: bool = False
+    has_tdie: bool = False
+    is_apu: bool = False
 
 
 @dataclass(frozen=True)
@@ -113,8 +188,10 @@ class HwmonSource:
         dmi_root: Path = Path("/sys/class/dmi/id"),
         sys_cpu: Path = Path("/sys/devices/system/cpu"),
         clock: Callable[[], float] = time.monotonic,
+        pci_ids: tuple[Path, ...] = PCI_IDS,
     ) -> None:
         self.root = root
+        self.pci_ids = pci_ids
         self.clock = clock
         self._chips: dict[Path, ChipInfo] = {}
         self.sys_cpu = sys_cpu
@@ -150,10 +227,55 @@ class HwmonSource:
 
     def _describe_chip(self, chip: Path, now: float) -> ChipInfo:
         chip_id = self._chip_id(chip)
-        profile = self._voltage_profile(read_text(chip / "name") or "")
+        name = read_text(chip / "name") or ""
+        profile = self._voltage_profile(name)
         device = self._device_name(chip)
-        channels = [self._describe(chip, chip_id, channel, profile) for channel in self._channels(chip)]
+        found = self._channels(chip)
+        labels = {read_text(chip / f"{c.prefix}{c.number}_label") for c in found}
+        context = ChipContext(
+            name=name,
+            gpu=name in GPU_DRIVERS,
+            has_tdie=any(label is not None and label.endswith("Tdie") for label in labels),
+            is_apu=name == "amdgpu" and "vddnb" in labels,  # only APUs report the northbridge
+        )
+        channels = [self._describe(chip, chip_id, channel, profile, context) for channel in found]
+        if name == "amdgpu":
+            channels += self._amdgpu_extras(chip, chip_id)
         return ChipInfo(device, channels, now)
+
+    def _amdgpu_extras(self, chip: Path, chip_id: str) -> list[ChannelInfo]:
+        """GPU load and VRAM use, which amdgpu publishes next to (not inside) its hwmon folder."""
+        extras = []
+        if (chip / "device" / "gpu_busy_percent").exists():
+            extras.append(
+                ChannelInfo(
+                    key=f"hwmon/{chip_id}/gpu_busy",
+                    label="GPU load",
+                    kind=Kind.LOAD,
+                    value_file="device/gpu_busy_percent",
+                    divisor=1,
+                    low=None,
+                    high=None,
+                    crit=None,
+                    companion=None,
+                )
+            )
+        if (chip / "device" / "mem_info_vram_used").exists() and (chip / "device" / "mem_info_vram_total").exists():
+            extras.append(
+                ChannelInfo(
+                    key=f"hwmon/{chip_id}/vram",
+                    label="Video memory used",
+                    kind=Kind.LOAD,
+                    value_file="device/mem_info_vram_used",
+                    divisor=1,
+                    low=None,
+                    high=None,
+                    crit=None,
+                    companion=None,
+                    ratio_of="device/mem_info_vram_total",
+                )
+            )
+        return extras
 
     def notes(self) -> list[str]:
         if self._found_kinds & {Kind.FAN, Kind.VOLTAGE}:
@@ -217,7 +339,11 @@ class HwmonSource:
             board = read_text(self.dmi_root / "board_name")
             return f"Motherboard · {board}" if board else f"Motherboard · {name}"
         if name == "amdgpu":
-            return "GPU · AMD"
+            model = read_text(device / "product_name") or pci_name(
+                read_text(device / "vendor") or "", read_text(device / "device") or "", self.pci_ids
+            )
+            model = (model or "").removeprefix("AMD ")  # "AMD Custom GPU 0405" must not read "AMD AMD"
+            return f"GPU · AMD {model}" if model else "GPU · AMD"
         if name == "nouveau":
             return "GPU · NVIDIA (nouveau)"
         if name in {"spd5118", "jc42"}:
@@ -242,11 +368,18 @@ class HwmonSource:
         return profile
 
     def _describe(
-        self, chip: Path, chip_id: str, channel: Channel, profile: dict[int, tuple[str, float]]
+        self,
+        chip: Path,
+        chip_id: str,
+        channel: Channel,
+        profile: dict[int, tuple[str, float]],
+        context: ChipContext | None = None,
     ) -> ChannelInfo:
+        context = context or ChipContext()
         kind, divisor, default_label = CHANNEL_TYPES[channel.prefix]
         base = f"{channel.prefix}{channel.number}"
         label = read_text(chip / f"{base}_label") or f"{default_label} {channel.number}"
+        label = self._friendly_label(label, kind, channel, context)
         if kind is Kind.VOLTAGE and channel.number in profile:
             label, multiplier = profile[channel.number]
             divisor = divisor / multiplier
@@ -263,9 +396,14 @@ class HwmonSource:
         def plausible(temp: float | None) -> float | None:
             return temp if temp is not None and PLAUSIBLE_TEMP[0] < temp < PLAUSIBLE_TEMP[1] else None
 
-        low = high = crit = None
+        low = high = crit = cap = None
         if kind is Kind.TEMPERATURE:
             high, crit = plausible(limit("max")), plausible(limit("crit"))
+            emergency = plausible(limit("emergency"))
+            if emergency is not None and high is None:
+                # amdgpu has no _max: its _crit is where the GPU starts throttling (a warning) and
+                # _emergency where it shuts down. Chips that also have _max keep their own meaning.
+                high, crit = crit, emergency
         elif kind is Kind.VOLTAGE:
             low, high = limit("min"), limit("max")
             # Many chips leave both at 0 (or max below min) meaning "not configured",
@@ -278,6 +416,9 @@ class HwmonSource:
         elif kind is Kind.FAN:
             fan_min = limit("min")
             low = fan_min if fan_min else None
+        elif kind is Kind.POWER:
+            power_cap = limit("cap")
+            cap = power_cap if power_cap else None  # shown for reference, never a warning
         return ChannelInfo(
             key=f"hwmon/{chip_id}/{base}",
             label=label,
@@ -288,11 +429,41 @@ class HwmonSource:
             high=high,
             crit=crit,
             companion=f"hwmon/{chip_id}/fan{channel.number}" if kind is Kind.FAN_DUTY else None,
+            cap=cap,
+            # Any fan header may have nothing plugged in, except a graphics card's own fans,
+            # which exist even while resting at 0 RPM.
+            empty_if_idle=kind is Kind.FAN and not context.gpu,
         )
+
+    def _friendly_label(self, label: str, kind: Kind, channel: Channel, context: ChipContext) -> str:
+        """Readable names for the drivers whose own labels are terse or internal."""
+        if context.name == "amdgpu":
+            if kind is Kind.POWER and context.is_apu and label in ("PPT", "slowPPT"):
+                return "Power draw (CPU and GPU)"  # on an APU the driver reports the whole chip
+            if kind is Kind.FAN_DUTY:
+                return f"Fan {channel.number} speed"  # like the NVIDIA card's percentage rows
+            return AMDGPU_LABELS.get(label, label)
+        if context.name in AMD_CPU_DRIVERS:
+            if socket := SOCKET_PREFIX.match(label):
+                inner = self._friendly_label(socket.group(2), kind, channel, context)
+                return f"{inner} (CPU {socket.group(1)})"
+            if label == "Tdie":
+                return "CPU temperature"  # the real die temperature
+            if label == "Tctl":
+                # Tctl is the value fans are driven by; some chips report it with an offset, and
+                # then Tdie (when there) is the real temperature.
+                return "CPU temperature (fan control)" if context.has_tdie else "CPU temperature"
+            if ccd := CCD_LABEL.match(label):
+                return f"CCD {ccd.group(1)}"  # one per chiplet; AMD reports no per-core temperatures
+            return ZENPOWER_LABELS.get(label, label)
+        return label
 
     def _read(self, chip: Path, device: str, info: ChannelInfo) -> Reading:
         raw = read_int(chip / info.value_file)
         value = raw / info.divisor if raw is not None else None
+        if info.ratio_of is not None:
+            total = read_int(chip / info.ratio_of)
+            value = raw * 100 / total if raw is not None and total else None
         unused = (
             info.kind is Kind.TEMPERATURE
             and device.startswith("Motherboard")
@@ -310,5 +481,6 @@ class HwmonSource:
             crit=info.crit,
             unused=unused,
             companion=info.companion,
-            empty_if_idle=info.kind is Kind.FAN,
+            empty_if_idle=info.empty_if_idle,
+            cap=info.cap,
         )

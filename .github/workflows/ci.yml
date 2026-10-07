@@ -1,0 +1,54 @@
+name: CI
+
+on:
+  # Every push to main.
+  push:
+    branches: [main]
+  # Every pull request: when it's opened, reopened, and on every push to its branch
+  # ("synchronize"); a push carrying several commits is tested at its newest one.
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+
+# A newer push to the same pull request makes its older run pointless, so cancel it;
+# runs on main always finish, so every commit that lands there gets a result.
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  checks:
+    name: Lint, types and tests
+    runs-on: ubuntu-latest
+    env:
+      QT_QPA_PLATFORM: offscreen  # Qt without a display
+    steps:
+      - uses: actions/checkout@v7
+
+      # setup-uv publishes only exact versions (no floating v10 tag), so pin one.
+      - uses: astral-sh/setup-uv@v10.2.0
+        with:
+          enable-cache: true
+
+      - name: System libraries Qt needs (and desktop-file-validate for one test)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libegl1 libgl1 libxkbcommon0 libfontconfig1 libdbus-1-3 libx11-6 desktop-file-utils
+
+      - name: Install dependencies
+        run: uv sync --locked
+
+      - name: Lint
+        run: uv run ruff check .
+
+      - name: Format
+        run: uv run ruff format --check .
+
+      - name: Types
+        run: uv run mypy
+
+      - name: Tests
+        run: uv run pytest -q

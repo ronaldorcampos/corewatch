@@ -288,3 +288,32 @@ def test_only_motherboard_fan_headers_may_be_empty(tmp_path: Path, proc_root: Pa
     )
     readings = {r.kind: r for r in source.sample()}
     assert readings[Kind.FAN].empty_if_idle and not readings[Kind.FAN_DUTY].empty_if_idle
+
+
+def test_fan_hub_ports_with_nothing_plugged_in_can_be_hidden(tmp_path: Path, proc_root: Path) -> None:
+    from corewatch.monitor import Monitor
+
+    source = make_source(
+        tmp_path, proc_root, {"hwmon10/name": "corsaircpro", "hwmon10/fan1_input": "0", "hwmon10/fan2_input": "900"}
+    )
+    readings = {r.label: r for r in source.sample()}
+    assert readings["Fan 1"].empty_if_idle  # a fan hub, not a motherboard, but just as likely empty
+    monitor = Monitor([source])
+    shown = [r.reading.label for r in monitor.visible_rows(monitor.sample(), False)]
+    assert shown == ["Fan 2"]
+
+
+def test_a_third_temperature_limit_only_remaps_when_there_is_no_warning_limit(tmp_path: Path, proc_root: Path) -> None:
+    source = make_source(
+        tmp_path,
+        proc_root,
+        {
+            "hwmon11/name": "max6695",
+            "hwmon11/temp1_input": "60000",
+            "hwmon11/temp1_max": "70000",
+            "hwmon11/temp1_crit": "85000",
+            "hwmon11/temp1_emergency": "100000",
+        },
+    )
+    [reading] = source.sample()
+    assert (reading.high, reading.crit) == (70.0, 85.0)  # its own warning and critical limits stay

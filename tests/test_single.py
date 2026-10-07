@@ -104,10 +104,15 @@ def test_a_message_that_arrives_in_pieces_still_counts(qtbot, tmp_path) -> None:
     server.close()
 
 
-def test_files_live_in_the_private_runtime_folder() -> None:
+def test_files_live_in_a_private_folder_of_this_user() -> None:
+    from pathlib import Path
+
     lock_path, socket_path = single.default_paths()
-    runtime = os.environ.get("XDG_RUNTIME_DIR")
-    if runtime:
-        assert lock_path == f"{runtime}/corewatch.lock" and socket_path == f"{runtime}/corewatch.sock"
-    else:
+    folder = Path(socket_path).parent
+    assert Path(lock_path).parent == folder
+    # $XDG_RUNTIME_DIR normally; Qt falls back to its own private folder if that's unusable.
+    if folder == Path("/tmp"):  # no private folder at all: names carry the user id
         assert socket_path.endswith(f"corewatch-{os.getuid()}.sock")
+    else:  # $XDG_RUNTIME_DIR, or Qt's own /tmp/runtime-<user> fallback
+        info = folder.stat()
+        assert info.st_uid == os.getuid() and info.st_mode & 0o077 == 0
