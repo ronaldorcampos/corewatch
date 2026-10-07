@@ -16,3 +16,11 @@ def proc_root(tmp_path: Path) -> Path:
     root = tmp_path / "proc"
     write_tree(root, {"cpuinfo": "processor\t: 0\nmodel name\t: 13th Gen Intel(R) Core(TM) i7-13700K\n"})
     return root
+
+
+@pytest.fixture(autouse=True)
+def private_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Every test gets its own config folder, so nothing ever touches the real ~/.config."""
+    config = tmp_path / "xdg-config"
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(config))
+    return config

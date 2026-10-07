@@ -754,3 +754,120 @@ def test_detail_subtitle_shows_the_fans_real_device(qtbot, settings) -> None:  #
     window = make_window(qtbot, settings, script)
     window._select("g")
     assert window.detail.subtitle.text() == "GPU · RTX"
+
+
+def test_start_at_login_toggle_writes_and_removes_the_autostart_entry(qtbot, settings, private_config) -> None:  # type: ignore[no-untyped-def]
+    entry = private_config / "autostart" / "corewatch.desktop"
+    window = make_window(qtbot, settings, SCRIPT)
+    assert window.autostart_file == entry and not window.autostart_action.isChecked()
+    window.autostart_action.setChecked(True)
+    assert entry.exists() and "X-Corewatch-Autostart=true" in entry.read_text()
+    assert "will start when you log in (runs " in window.statusBar().currentMessage()
+    entry.unlink()  # removed from the desktop's Startup Applications instead
+    window._sync_autostart()  # (runs whenever the ⋯ menu opens)
+    assert not window.autostart_action.isChecked()
+    window.autostart_action.setChecked(True)
+    window.autostart_action.setChecked(False)
+    assert not entry.exists()
+
+
+def test_start_at_login_leaves_a_foreign_entry_alone(qtbot, settings, private_config) -> None:  # type: ignore[no-untyped-def]
+    entry = private_config / "autostart" / "corewatch.desktop"
+    entry.parent.mkdir(parents=True)
+    entry.write_text("[Desktop Entry]\nExec=corewatch --their-own-flags\n")
+    window = make_window(qtbot, settings, SCRIPT)
+    assert window.autostart_action.isChecked()
+    window.autostart_action.setChecked(False)
+    assert entry.exists() and window.autostart_action.isChecked()
+    assert "Startup Applications" in window.statusBar().currentMessage()
+
+
+def test_start_at_login_reports_a_write_failure(qtbot, settings, private_config) -> None:  # type: ignore[no-untyped-def]
+    private_config.mkdir(parents=True)
+    (private_config / "autostart").write_text("not a folder")
+    window = make_window(qtbot, settings, SCRIPT)
+    window.autostart_action.setChecked(True)
+    assert not window.autostart_action.isChecked()
+    assert window.statusBar().currentMessage().startswith("Couldn't change the login setting")
+
+
+def test_an_unreadable_login_entry_never_stops_corewatch_starting(qtbot, settings, private_config) -> None:  # type: ignore[no-untyped-def]
+    entry = private_config / "autostart" / "corewatch.desktop"
+    entry.parent.mkdir(parents=True)
+    entry.write_bytes(b"[Desktop Entry]\nName=caf\xe9\n")
+    window = make_window(qtbot, settings, SCRIPT)
+    assert not window.autostart_action.isChecked()
+    window.autostart_action.setChecked(True)
+    assert not window.autostart_action.isChecked() and "can't be read" in window.statusBar().currentMessage()
+
+
+def test_start_minimized_option_is_remembered(qtbot, settings) -> None:  # type: ignore[no-untyped-def]
+    window = make_window(qtbot, settings, SCRIPT)
+    assert not window.minimized_action.isChecked()
+    window.minimized_action.setChecked(True)
+    assert make_window(qtbot, settings, SCRIPT).start_minimized
+
+
+def test_start_shows_the_window_or_stays_in_the_tray(qtbot, settings) -> None:  # type: ignore[no-untyped-def]
+    shown = make_window(qtbot, settings, SCRIPT)
+    shown.start(False, lambda: True, FakeTray)  # type: ignore[arg-type]
+    assert shown.isVisible() and shown.trays
+    tray_only = make_window(qtbot, settings, SCRIPT)
+    tray_only.start(True, lambda: True, FakeTray)  # type: ignore[arg-type]
+    assert not tray_only.isVisible() and tray_only.trays
+
+
+def test_a_tray_that_turns_up_late_is_waited_for(qtbot, settings) -> None:  # type: ignore[no-untyped-def]
+    ready = []
+    window = make_window(qtbot, settings, SCRIPT)
+    window.start(True, lambda: bool(ready), FakeTray, at_login=True, retry_ms=10, attempts=50)  # type: ignore[arg-type]
+    assert not window.isVisible() and not window.trays  # waiting, out of sight
+    ready.append(True)
+    qtbot.waitUntil(lambda: bool(window.trays), timeout=2000)
+    assert not window.isVisible()  # the tray arrived: stay there
+
+
+def test_no_tray_at_all_means_the_window_opens(qtbot, settings) -> None:  # type: ignore[no-untyped-def]
+    window = make_window(qtbot, settings, SCRIPT)
+    window.start(True, lambda: False, FakeTray, at_login=True, retry_ms=10, attempts=3)  # type: ignore[arg-type]
+    qtbot.waitUntil(window.isVisible, timeout=2000)
+    assert not window.trays
+
+
+def test_a_window_opened_without_a_tray_still_gets_one_later(qtbot, settings) -> None:  # type: ignore[no-untyped-def]
+    ready = []
+    window = make_window(qtbot, settings, SCRIPT)
+    window.start(False, lambda: bool(ready), FakeTray, retry_ms=10, attempts=50)  # type: ignore[arg-type]
+    assert window.isVisible()
+    ready.append(True)
+    qtbot.waitUntil(lambda: bool(window.trays), timeout=2000)  # so close-to-tray works after all
+
+
+def test_start_at_login_reports_a_folder_it_cannot_write(qtbot, settings, private_config) -> None:  # type: ignore[no-untyped-def]
+    folder = private_config / "autostart"
+    folder.mkdir(parents=True)
+    folder.chmod(0o500)  # readable, not writable
+    try:
+        window = make_window(qtbot, settings, SCRIPT)
+        window.autostart_action.setChecked(True)
+        assert not window.autostart_action.isChecked()
+        assert window.statusBar().currentMessage().startswith("Couldn't change the login setting")
+        assert list(folder.iterdir()) == []
+    finally:
+        folder.chmod(0o700)
+
+
+def test_minimized_without_a_tray_opens_at_once_unless_starting_at_login(qtbot, settings) -> None:  # type: ignore[no-untyped-def]
+    window = make_window(qtbot, settings, SCRIPT)
+    window.start(True, lambda: False, FakeTray, retry_ms=10, attempts=50)  # type: ignore[arg-type]
+    assert window.isVisible()  # an ordinary launch never makes you wait
+    assert not window.minimized_action.isEnabled()  # and the option says it needs a tray
+
+
+def test_start_minimized_is_offered_once_a_tray_exists(qtbot, settings) -> None:  # type: ignore[no-untyped-def]
+    ready = []
+    window = make_window(qtbot, settings, SCRIPT)
+    window.start(False, lambda: bool(ready), FakeTray, retry_ms=10, attempts=50)  # type: ignore[arg-type]
+    assert not window.minimized_action.isEnabled()
+    ready.append(True)
+    qtbot.waitUntil(window.minimized_action.isEnabled, timeout=2000)

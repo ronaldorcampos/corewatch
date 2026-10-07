@@ -39,6 +39,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("-i", "--interval", type=interval_arg, default=None, help="seconds between updates (0.25-60)")
     parser.add_argument("-f", "--fahrenheit", action="store_true", default=None, help="show temperatures in °F")
+    parser.add_argument("--minimized", action="store_true", help="gui: start in the tray without opening the window")
+    parser.add_argument("--login", action="store_true", help=argparse.SUPPRESS)  # set by the login entry
     parser.add_argument("--json", action="store_true", help="dump: print machine-readable JSON")
     parser.add_argument(
         "--all", action="store_true", help="dump: include unused inputs (empty fan headers, unconnected probes)"
@@ -100,7 +102,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.mode == "gui":
         from corewatch.gui.app import run_gui
 
-        return run_gui(interval=args.interval, fahrenheit=args.fahrenheit)
+        return run_gui(
+            interval=args.interval, fahrenheit=args.fahrenheit, minimized=args.minimized, at_login=args.login
+        )
 
     monitor = Monitor(default_sources())
     try:

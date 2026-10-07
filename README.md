@@ -34,7 +34,12 @@ load and power reading your machine exposes, refreshes them at an interval you c
   hidden (⋯ → Show unused sensors brings them back). A fan that stops after spinning is never
   hidden, and neither is anything in a warning state or a GPU fan idling at 0 RPM.
 - **Comfortable to leave open.** Light and dark themes (following the desktop by default), a filter
-  box (Ctrl+F), °C/°F and a Min / max toggle. Sensors are read on a background thread, so a slow
+  box (Ctrl+F), °C/°F and a Min / max toggle. **⋯ → Start when I log in** starts corewatch at
+  every login (it adds `~/.config/autostart/corewatch.desktop`, which your desktop's Startup
+  Applications settings also show), and **⋯ → Start minimized in the tray** starts it without
+  opening the window, at login or any other time (it needs a system tray; at login corewatch
+  waits up to 30 s for the panel's tray to appear, and opens the window if none does). Opening corewatch while it's already running
+  brings up the running one instead of starting a second copy. Sensors are read on a background thread, so a slow
   driver never freezes the window.
   Settings are remembered in `~/.config/corewatch/corewatch.conf`.
 - **Terminal view** (`corewatch tui`) for SSH sessions, and a **one-shot dump**
@@ -88,7 +93,8 @@ corewatch dump           # print every reading once
 corewatch dump --json    # the same, for scripts
 ```
 
-Options: `-i/--interval SECONDS` (0.25-60, for this run only), `-f/--fahrenheit`, and for `dump`,
+Options: `-i/--interval SECONDS` (0.25-60, for this run only), `-f/--fahrenheit`, `--minimized`
+(start in the tray without opening the window, whatever the setting says), and for `dump`,
 `--all` to include unused inputs.
 
 Terminal view keys: `q` quit · `r` reset min/max · `f` toggle °C/°F · `u` show/hide unused sensors ·

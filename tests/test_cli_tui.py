@@ -186,3 +186,8 @@ async def test_tui_gathers_fans_into_one_group() -> None:
     app = CorewatchApp(Monitor([source]), interval=60)
     async with app.run_test():
         assert [r[0] for r in cell_texts(app.query_one(DataTable))] == ["CPU", "  t", "Fans", "  GPU fan 1"]
+
+
+def test_minimized_flag() -> None:
+    assert build_parser().parse_args(["--minimized"]).minimized is True
+    assert build_parser().parse_args([]).minimized is False

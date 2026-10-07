@@ -8,8 +8,9 @@ import sys
 import time
 from collections.abc import Callable
 from dataclasses import replace
+from pathlib import Path
 
-from PySide6.QtCore import QByteArray, QObject, QPoint, QSettings, Qt, QThread, QTimer, Signal, Slot
+from PySide6.QtCore import QByteArray, QObject, QPoint, QSettings, QSignalBlocker, Qt, QThread, QTimer, Signal, Slot
 from PySide6.QtGui import QAction, QActionGroup, QCloseEvent, QColor, QFont, QGuiApplication, QIcon, QPainter, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
@@ -31,7 +32,9 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from corewatch import autostart
 from corewatch.cli import MAX_INTERVAL, MIN_INTERVAL
+from corewatch.gui import single
 from corewatch.gui import theme as themes
 from corewatch.gui.sensors import CategorySection
 from corewatch.gui.widgets import DetailPanel
@@ -106,8 +109,10 @@ class MainWindow(QMainWindow):
         settings: QSettings,
         interval: float | None = None,
         fahrenheit: bool | None = None,
+        autostart_file: Path | None = None,
     ) -> None:
         super().__init__()
+        self.autostart_file = autostart_file or autostart.autostart_path()
         self.monitor = monitor
         self.settings = settings
         stored_interval = settings.value("interval", 1.0)
@@ -124,6 +129,7 @@ class MainWindow(QMainWindow):
             self.theme = "system"
         self.close_to_tray = bool(settings.value("close_to_tray", False, type=bool))
         self.show_unused = bool(settings.value("show_unused", False, type=bool))
+        self.start_minimized = bool(settings.value("start_minimized", False, type=bool))
         self.show_min_max = bool(settings.value("show_min_max", True, type=bool))
         collapsed = settings.value("collapsed", [], type=list)
         self.collapsed: set[str] = {str(d) for d in collapsed} if isinstance(collapsed, list) else set()
@@ -264,6 +270,20 @@ class MainWindow(QMainWindow):
         self.tray_action.setCheckable(True)
         self.tray_action.setChecked(self.close_to_tray)
         self.tray_action.toggled.connect(self._set_close_to_tray)
+        self.autostart_action = menu.addAction("Start when I log in")
+        self.autostart_action.setCheckable(True)
+        self.autostart_action.setToolTip("Start corewatch each time you log in to your desktop")
+        menu.aboutToShow.connect(self._sync_autostart)  # it can be changed outside corewatch too
+        self._sync_autostart()
+        self.autostart_action.toggled.connect(self.set_autostart)
+        self.minimized_action = menu.addAction("Start minimized in the tray")
+        self.minimized_action.setCheckable(True)
+        self.minimized_action.setChecked(self.start_minimized)
+        self.minimized_action.setToolTip(
+            "Start without opening this window; click the tray icon to open it. "
+            "Applies at login too. Without a system tray the window always opens."
+        )
+        self.minimized_action.toggled.connect(self._set_start_minimized)
         menu.addSeparator()
         quit_action = menu.addAction("Quit")
         quit_action.setShortcut("Ctrl+Q")
@@ -360,6 +380,82 @@ class MainWindow(QMainWindow):
         if isinstance(app, QApplication):
             themes.apply(app, themes.current_theme())
         self.redraw()
+
+    def _sync_autostart(self) -> None:
+        """Show what's really configured: the autostart file is the setting."""
+        with QSignalBlocker(self.autostart_action):
+            self.autostart_action.setChecked(autostart.is_enabled(self.autostart_file))
+
+    def set_autostart(self, enabled: bool) -> None:
+        try:
+            if enabled:
+                message = autostart.enable(self.autostart_file)
+            elif autostart.disable(self.autostart_file):
+                message = "corewatch won't start when you log in"
+            else:
+                message = (
+                    f"{self.autostart_file} wasn't created by corewatch (or can't be read), so it was left "
+                    "alone. Turn it off in your desktop's Startup Applications settings."
+                )
+        except autostart.AutostartError as error:
+            message = str(error)
+        except OSError as error:
+            message = f"Couldn't change the login setting: {error.strerror or error}"
+        self._sync_autostart()
+        self.statusBar().showMessage(message, 8000)
+
+    def _set_start_minimized(self, enabled: bool) -> None:
+        self.start_minimized = enabled
+        self.settings.setValue("start_minimized", enabled)
+
+    def start(
+        self,
+        minimized: bool,
+        tray_available: Callable[[], bool],
+        tray_factory: Callable[[], QSystemTrayIcon],
+        at_login: bool = False,
+        retry_ms: int = 1000,
+        attempts: int = 30,
+    ) -> None:
+        """Show the window, or start in the tray.
+
+        Without a tray, the window opens straight away, except at login: there the panel's
+        tray often comes up a moment after corewatch does, so a minimized login start waits
+        for it, out of sight, and only opens the window if no tray appears. Either way the
+        tray is attached whenever it turns up, so close-to-tray works afterwards."""
+        if tray_available():
+            self.attach_tray(tray_factory)
+            if not minimized:
+                self.show_window()
+            return
+        self._set_tray_options_available(False)
+        if not (minimized and at_login):
+            self.show_window()
+        self._tray_tries = attempts
+
+        def retry() -> None:
+            if tray_available():
+                self._tray_timer.stop()
+                self.attach_tray(tray_factory)
+                return
+            self._tray_tries -= 1
+            if self._tray_tries <= 0:
+                self._tray_timer.stop()
+                if not self.isVisible():
+                    self.show_window()  # no tray to return to: never leave corewatch out of reach
+
+        self._tray_timer = QTimer(self)
+        self._tray_timer.timeout.connect(retry)
+        self._tray_timer.start(retry_ms)
+
+    def _set_tray_options_available(self, available: bool) -> None:
+        """Starting minimized needs a tray to come back from; say so instead of silently failing."""
+        self.minimized_action.setEnabled(available)
+        self.minimized_action.setToolTip(
+            "Start without opening this window; click the tray icon to open it. Applies at login too."
+            if available
+            else "Needs a system tray, and this desktop doesn't have one right now"
+        )
 
     def _set_close_to_tray(self, enabled: bool) -> None:
         self.close_to_tray = enabled
@@ -579,6 +675,7 @@ class MainWindow(QMainWindow):
         self._tray_factory = factory
         self._update_tray()
         self._show_detail()  # pinning is possible now
+        self._set_tray_options_available(True)
 
     def _tray_menu_for(self, key: str) -> QMenu:
         """Each icon gets its own menu, so a pinned sensor can always be unpinned from its
@@ -683,9 +780,12 @@ class MainWindow(QMainWindow):
         if self.isVisible():
             self.hide()
         else:
-            self.show()
-            self.raise_()
-            self.activateWindow()
+            self.show_window()
+
+    def show_window(self) -> None:
+        self.show()
+        self.raise_()
+        self.activateWindow()
 
     def quit(self) -> None:
         self._quitting = True
@@ -728,24 +828,41 @@ class MainWindow(QMainWindow):
         return not self.worker_stuck
 
 
-def run_gui(interval: float | None = None, fahrenheit: bool | None = None) -> int:
+def run_gui(
+    interval: float | None = None, fahrenheit: bool | None = None, minimized: bool = False, at_login: bool = False
+) -> int:
     app = QApplication(sys.argv)
     app.setApplicationName("corewatch")
     app.setOrganizationName("corewatch")
     app.setDesktopFileName("corewatch")
     app.setStyle("Fusion")
     app.setQuitOnLastWindowClosed(False)  # the tray may keep us alive; quitting is explicit
+    # Already running? Bring that one forward (unless this start wants to stay out of sight)
+    # and stop. Decided before anything slow, so two starts a moment apart can't both run.
+    lock_path, socket_path = single.default_paths()
+    lock, answered = single.claim(lock_path, socket_path, show=not (minimized or at_login))
+    if lock is None:
+        if not answered:
+            print("corewatch: another corewatch is running but not answering", file=sys.stderr)
+        return 0
     monitor = Monitor(default_sources())
     window = MainWindow(monitor, QSettings(), interval=interval, fahrenheit=fahrenheit)
+    single.InstanceServer(socket_path, window.show_window, window)
     app.aboutToQuit.connect(window.shutdown)
-    if QSystemTrayIcon.isSystemTrayAvailable():
-        window.attach_tray(lambda: QSystemTrayIcon(window))
-    window.show()
+    with contextlib.suppress(autostart.AutostartError, OSError):
+        autostart.refresh(window.autostart_file)  # keep our login entry pointing at this install
+    window.start(
+        minimized or window.start_minimized,
+        QSystemTrayIcon.isSystemTrayAvailable,
+        lambda: QSystemTrayIcon(window),
+        at_login=at_login,
+    )
     code = 1
     try:
         code = app.exec()
     finally:
         finish(window, monitor, code)
+        lock.release()
     return code
 
 
