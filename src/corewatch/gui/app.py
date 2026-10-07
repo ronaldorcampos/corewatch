@@ -8,6 +8,7 @@ import sys
 import time
 from collections.abc import Callable
 from dataclasses import replace
+from importlib.resources import files
 from pathlib import Path
 
 from PySide6.QtCore import QByteArray, QObject, QPoint, QSettings, QSignalBlocker, Qt, QThread, QTimer, Signal, Slot
@@ -47,6 +48,8 @@ SHUTDOWN_WAIT_MS = 3000
 
 # Lines at the top of a pinned icon's menu: group, name, min, max, average.
 TRAY_INFO_LINES = 5
+# The logo's size in the toolbar, where the app name used to be.
+LOGO_SIZE = 28
 # Key of the tray icon shown when no sensor is pinned: the CPU temperature.
 DEFAULT_TRAY = ""
 
@@ -57,6 +60,12 @@ THEMES = {
     "light": Qt.ColorScheme.Light,
     "dark": Qt.ColorScheme.Dark,
 }
+
+
+def app_icon() -> QIcon:
+    """corewatch's own icon, bundled with the package so it shows even when it isn't installed
+    into the desktop's icon theme."""
+    return QIcon(str(files("corewatch") / "assets" / "corewatch.svg"))
 
 
 def number_icon(text: str, status: Status) -> QIcon:
@@ -154,7 +163,7 @@ class MainWindow(QMainWindow):
         self._quitting = False
 
         self.setWindowTitle("corewatch")
-        self.setWindowIcon(QIcon.fromTheme("utilities-system-monitor", temperature_icon(None, Status.OK, False)))
+        self.setWindowIcon(app_icon())
         self.timer = QTimer(self)
         self.timer.timeout.connect(self._request_sample)
         self._sampling = False
@@ -188,9 +197,12 @@ class MainWindow(QMainWindow):
         toolbar.toggleViewAction().setVisible(False)
         self.addToolBar(toolbar)
 
-        title = QLabel("corewatch")
-        title.setObjectName("appTitle")
-        toolbar.addWidget(title)
+        self.logo = QLabel()
+        self.logo.setObjectName("appLogo")
+        self.logo.setPixmap(app_icon().pixmap(LOGO_SIZE, LOGO_SIZE))
+        self.logo.setToolTip("corewatch")
+        self.logo.setAccessibleName("corewatch")
+        toolbar.addWidget(self.logo)
         self.filter = QLineEdit()
         self.filter.setPlaceholderText("Filter sensors  (Ctrl+F)")
         self.filter.setClearButtonEnabled(True)
@@ -864,6 +876,7 @@ def run_gui(
     app.setApplicationName("corewatch")
     app.setOrganizationName("corewatch")
     app.setDesktopFileName("corewatch")
+    app.setWindowIcon(app_icon())
     app.setStyle("Fusion")
     app.setQuitOnLastWindowClosed(False)  # the tray may keep us alive; quitting is explicit
     # Already running? Bring that one forward (unless this start wants to stay out of sight)

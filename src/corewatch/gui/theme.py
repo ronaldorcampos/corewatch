@@ -114,7 +114,7 @@ def stylesheet(t: Theme) -> str:
     return f"""
     QMainWindow, #central {{ background: {t.window}; }}
     QToolBar {{ background: {t.window}; border: none; padding: 8px 10px 4px 10px; spacing: 8px; }}
-    QToolBar QLabel#appTitle {{ font-weight: 600; font-size: 15px; padding-right: 8px; }}
+    QToolBar QLabel#appLogo {{ padding: 0 8px 0 2px; }}
     QLineEdit, QComboBox {{
         background: {t.surface}; border: 1px solid {t.border}; border-radius: 6px;
         padding: 5px 8px; selection-background-color: {t.accent_soft}; selection-color: {t.accent_text};

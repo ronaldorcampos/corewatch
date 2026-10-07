@@ -9,7 +9,7 @@ import pytest
 from fakes import FakeSource, load, temp
 from PySide6.QtCore import QEvent, QObject, QPoint, QRect, QSettings, Qt, Signal
 from PySide6.QtGui import QImage
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QLabel
 
 from corewatch.gui import theme
 from corewatch.gui.app import MainWindow, temperature_icon
@@ -918,3 +918,34 @@ def test_pinned_tray_menu_lists_name_min_max_and_average(qtbot, settings) -> Non
     assert len(info) == 5 and not any(a.isEnabled() for a in info)  # information, not commands
     window.set_fahrenheit(True)
     assert texts()[3] == "min: 122.0 °F"
+
+
+def test_the_logo_replaces_the_name_in_the_toolbar_and_is_the_window_icon(qtbot, settings) -> None:  # type: ignore[no-untyped-def]
+    from corewatch.gui.app import LOGO_SIZE, app_icon
+
+    window = make_window(qtbot, settings, SCRIPT)
+    assert not app_icon().isNull()
+    pixmap = window.logo.pixmap()
+    assert not pixmap.isNull() and pixmap.width() >= LOGO_SIZE
+    assert window.logo.toolTip() == "corewatch" and window.logo.accessibleName() == "corewatch"
+    assert not window.windowIcon().isNull()
+    assert not any(label.text() == "corewatch" for label in window.findChildren(QLabel))  # no text title left
+
+
+def test_the_icon_ships_inside_the_package() -> None:
+    from importlib.resources import files
+
+    from PySide6.QtSvg import QSvgRenderer
+
+    icon = files("corewatch") / "assets" / "corewatch.svg"
+    assert icon.is_file()
+    assert QSvgRenderer(str(icon)).isValid()
+
+
+def test_launcher_and_login_entries_use_the_corewatch_icon() -> None:
+    from pathlib import Path
+
+    from corewatch import autostart
+
+    assert "Icon=corewatch" in Path("packaging/corewatch.desktop").read_text().splitlines()
+    assert "Icon=corewatch" in autostart.entry(["/usr/bin/corewatch"]).splitlines()

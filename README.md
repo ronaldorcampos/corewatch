@@ -1,3 +1,5 @@
+<p align="center"><img src="src/corewatch/assets/corewatch.svg" width="112" alt=""></p>
+
 # corewatch
 
 A Core Temp-style hardware monitor for Linux. It shows every temperature, fan speed, voltage, clock,
@@ -82,6 +84,12 @@ install the desktop entry, pointing it at the full path because launchers don't 
 curl -fsSL --create-dirs -o ~/.local/share/applications/corewatch.desktop https://raw.githubusercontent.com/ronaldorcampos/corewatch/main/packaging/corewatch.desktop && sed -i "s|^Exec=corewatch\$|Exec=$HOME/.local/bin/corewatch|" ~/.local/share/applications/corewatch.desktop
 ```
 
+And its icon, so the launcher shows it:
+
+```bash
+curl -fsSL --create-dirs -o ~/.local/share/icons/hicolor/scalable/apps/corewatch.svg https://raw.githubusercontent.com/ronaldorcampos/corewatch/main/src/corewatch/assets/corewatch.svg
+```
+
 To update to the latest version later:
 
 ```bash
@@ -102,7 +110,8 @@ uv tool install .
 ```
 
 `uv tool install` takes a snapshot of the code; after changing or pulling it, refresh with
-`uv tool install --reinstall .`.
+`uv tool install --reinstall .`. The launcher entry and icon are in `packaging/corewatch.desktop`
+and `src/corewatch/assets/corewatch.svg`.
 
 ## Usage
 

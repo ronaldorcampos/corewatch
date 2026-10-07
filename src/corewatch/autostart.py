@@ -93,7 +93,7 @@ def entry(command: list[str]) -> str:
             "Name=corewatch",
             "Comment=Hardware monitor: temperatures, fans, voltages, clocks and power",
             f"Exec={quote_exec([*command, LOGIN_FLAG])}",
-            "Icon=utilities-system-monitor",
+            "Icon=corewatch",
             "Terminal=false",
             "X-GNOME-Autostart-enabled=true",
             f"{MARKER_KEY}=true",
