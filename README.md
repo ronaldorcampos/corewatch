@@ -28,12 +28,17 @@ load and power reading your machine exposes, refreshes them at an interval you c
   gappy core IDs. Nuvoton motherboard chips get named voltage rails (Vcore, +12V, +5V, +3.3V, ...).
   Right-click any sensor and choose **Rename…** to give it your own name (handy for "Fan 2" →
   "CPU fan"); **Reset name** undoes it.
+- **Tray icon.** corewatch's logo sits in the tray, in one colour like the desktop's own icons
+  there. Its menu opens the window and has every option the window has: reset min/max, update
+  interval, °C/°F, the min/max columns, and everything in the ⋯ menu, through to Quit.
+  Double-click it (or, on desktops where a click doesn't open the menu, click it) to bring the
+  window up.
 - **Pin sensors to the tray.** Right-click a sensor and choose **Pin to tray**, or use the button
   in the detail panel. Each pinned sensor gets its own tray icon showing its number, like Core
   Temp's per-core icons. Right-click one to see its group, name, min, max and average, or to
   unpin it (which also works for a sensor that has stopped reporting; its icon shows "?"). On desktops
   whose tray shows tooltips (KDE, Xfce, Cinnamon) hovering shows the same; Ubuntu's doesn't.
-  With nothing pinned, one icon shows the CPU temperature.
+  Double-clicking a pinned icon also brings the window up.
 - **Noise hidden by default.** Empty motherboard fan headers and unconnected temperature probes are
   hidden (⋯ → Show unused sensors brings them back). A fan that stops after spinning is never
   hidden, and neither is anything in a warning state or a GPU fan idling at 0 RPM.

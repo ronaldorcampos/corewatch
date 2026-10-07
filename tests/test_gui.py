@@ -319,13 +319,16 @@ def test_tray_updates_only_when_something_changes(qtbot, settings) -> None:  # t
     window = make_window(qtbot, settings, [SCRIPT[0]])
     trays: list[FakeTray] = []
     window.attach_tray(lambda: trays.append(FakeTray()) or trays[-1])  # type: ignore[arg-type,func-returns-value]
-    [tray] = trays
-    assert tray.icons == 1 and "CPU 50.0 °C · 5% load" in tray.tooltips[-1]
+    window.set_pinned("pkg", True)
+    logo, tray = trays
+    assert "CPU 50.0 °C · 5% load" in logo.tooltips[-1]
+    assert tray.icons == 1
     window.refresh()
     window.refresh()
-    assert tray.icons == 1  # same reading, nothing sent
+    assert tray.icons == 1 and len(logo.tooltips) == 1  # same reading, nothing sent
     window.set_fahrenheit(True)
     assert tray.icons == 2
+    assert logo.icons == 1 and "122.0 °F" in logo.tooltips[-1]  # the logo itself never changes
 
 
 def test_close_to_tray_hides_and_quit_really_closes(qtbot, settings, monkeypatch) -> None:  # type: ignore[no-untyped-def]
@@ -338,7 +341,7 @@ def test_close_to_tray_hides_and_quit_really_closes(qtbot, settings, monkeypatch
     monkeypatch.setattr(QApplication, "quit", lambda *a: None)
     window.close()
     assert window.isHidden() and window._thread.isRunning()  # still sampling in the tray
-    window.toggle_visible()
+    window.show_window()
     assert window.isVisible()
     window.quit()
     assert window.isHidden() and not window._thread.isRunning()
@@ -622,21 +625,21 @@ def test_pinned_sensors_get_their_own_tray_icons(qtbot, settings) -> None:  # ty
     window = make_window(qtbot, settings, SCRIPT)
     made: list[FakeTray] = []
     window.attach_tray(lambda: made.append(FakeTray()) or made[-1])  # type: ignore[arg-type,func-returns-value]
-    assert list(window.trays) == [""]  # nothing pinned: the CPU temperature icon
+    assert list(window.trays) == [""]  # nothing pinned: only corewatch's own icon
     window.sensor_menu("gpu").actions()[0].trigger()  # Pin to tray
     window.set_pinned("cpu-load", True)
-    assert list(window.trays) == ["gpu", "cpu-load"]
-    assert not made[0].visible  # the default icon steps aside once something is pinned
+    assert list(window.trays) == ["", "gpu", "cpu-load"]
+    assert made[0].visible  # corewatch's icon stays beside the pinned ones
     assert made[1].tooltips[-1] == "GPU · RTX\nGPU temperature\nmin: 41.0 °C\nmax: 41.0 °C\naverage: 41.0 °C"
     assert window._tray_states["cpu-load"][0] == "5"
     window._select("gpu")
     assert window.detail.pin_button.isChecked()
     window.detail.pin_button.click()  # unpin from the detail panel
-    assert list(window.trays) == ["cpu-load"]
+    assert list(window.trays) == ["", "cpu-load"]
     assert json.loads(settings.value("pinned")) == ["cpu-load"]
     reopened = make_window(qtbot, settings, SCRIPT)
     reopened.attach_tray(FakeTray)  # type: ignore[arg-type]
-    assert list(reopened.trays) == ["cpu-load"]
+    assert list(reopened.trays) == ["", "cpu-load"]
 
 
 def test_pin_is_disabled_without_a_system_tray(qtbot, settings) -> None:  # type: ignore[no-untyped-def]
@@ -683,7 +686,7 @@ def test_renaming_never_changes_what_the_tray_and_summary_track(qtbot, settings)
     window.attach_tray(FakeTray)  # type: ignore[arg-type]
     window.rename_sensor("pkg", "My CPU")
     window.rename_sensor("cpu-load", "Busy")
-    assert window._tray_states[""][0] == "50"  # still the package, not the hottest core
+    assert "CPU 50.0 °C" in window._tray_states[""][2]  # still the package, not the hottest core
     assert window._summary() == ["CPU 50.0 °C · 5% load"]
 
 
@@ -720,11 +723,12 @@ def test_tray_icons_and_menus_are_freed_when_unpinned(qtbot, settings) -> None: 
         pass
 
     window.attach_tray(lambda: QtTray())  # type: ignore[arg-type]
+    before = len(window.findChildren(QMenu))  # the ⋯ menu, corewatch's tray menu and their submenus
     for _ in range(3):
         window.set_pinned("gpu", True)
         window.set_pinned("gpu", False)
     QApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
-    assert len(window.findChildren(QMenu)) <= 3  # the ⋯ menu, its Theme submenu, one tray menu
+    assert len(window.findChildren(QMenu)) == before
 
 
 def test_right_click_opens_the_sensor_menu_and_frees_it(qtbot, settings) -> None:  # type: ignore[no-untyped-def]
@@ -949,3 +953,154 @@ def test_launcher_and_login_entries_use_the_corewatch_icon() -> None:
 
     assert "Icon=corewatch" in Path("packaging/corewatch.desktop").read_text().splitlines()
     assert "Icon=corewatch" in autostart.entry(["/usr/bin/corewatch"]).splitlines()
+
+
+def test_corewatchs_tray_menu_has_the_apps_options(qtbot, settings, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    window = make_window(qtbot, settings, SCRIPT)
+    made: list[FakeTray] = []
+    window.attach_tray(lambda: made.append(FakeTray()) or made[-1])  # type: ignore[arg-type,func-returns-value]
+    window.set_pinned("pkg", True)
+    window.refresh()
+    logo, pinned = made
+
+    def texts(menu) -> list[str]:  # type: ignore[no-untyped-def]
+        return ["---" if a.isSeparator() else a.text() for a in menu.actions() if a.isVisible()]
+
+    assert logo.icons == 1
+    assert texts(logo.menu) == [
+        "Open corewatch",
+        "---",
+        "Reset min/max",
+        "Update every",
+        "Temperatures in",
+        "Show min / max in the list",
+        "---",
+        "Theme",
+        "Show unused sensors",
+        "Expand all",
+        "Collapse all",
+        "---",
+        "Keep running in the tray when closed",
+        "Start when I log in",
+        "Start minimized in the tray",
+        "---",
+        "Quit",
+    ]
+    assert texts(window.menu_button.menu())[0] == "Theme"  # the ⋯ menu has the same options from Theme down
+    assert texts(window.menu_button.menu()) == texts(logo.menu)[7:]
+    assert texts(pinned.menu)[-1] == "Unpin CPU package"  # a pinned icon's menu is about its sensor only
+    assert "Quit" not in texts(pinned.menu)
+
+    def item(text: str):  # type: ignore[no-untyped-def]
+        return next(a for a in logo.menu.actions() if a.text() == text)
+
+    item("Open corewatch").trigger()
+    assert window.isVisible()
+    assert window.rows["pkg"].stats.maximum == 85.0
+    item("Reset min/max").trigger()
+    assert window.rows["pkg"].stats.maximum is None
+
+    # Every option in the tray stays in step with the window's own controls, both ways.
+    every = {a.text(): a for a in item("Update every").menu().actions()}
+    every["5 s"].trigger()
+    assert window.interval == 5.0 and window.interval_box.currentText() == "5 s"
+    assert settings.value("interval", type=float) == 5.0
+    window.interval_box.setCurrentIndex(window.interval_box.findData(2.0))
+    assert window.interval == 2.0 and every["2 s"].isChecked() and not every["5 s"].isChecked()
+    units = {a.text(): a for a in item("Temperatures in").menu().actions()}
+    units["Fahrenheit (°F)"].trigger()
+    assert window.fahrenheit and window.fahrenheit_button.isChecked()
+    window.celsius_button.click()
+    assert not window.fahrenheit and units["Celsius (°C)"].isChecked()
+    item("Show min / max in the list").trigger()
+    assert not window.show_min_max and not window.min_max_button.isChecked()
+    window.min_max_button.click()
+    assert window.show_min_max and item("Show min / max in the list").isChecked()
+    dark = next(a for a in item("Theme").menu().actions() if a.text() == "Dark")
+    dark.trigger()
+    assert window.theme == "dark" and dark.isChecked()
+    window.apply_theme("system")
+    item("Show unused sensors").trigger()
+    assert window.show_unused and window.unused_action.isChecked()
+
+    quits: list[bool] = []
+    monkeypatch.setattr(window, "quit", lambda: quits.append(True))
+    item("Quit").trigger()
+    assert quits == [True]
+
+
+def test_corewatchs_own_icon_stays_while_the_window_is_open(qtbot, settings, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    window = make_window(qtbot, settings, SCRIPT)
+    made: list[FakeTray] = []
+    window.start(False, lambda: True, lambda: made.append(FakeTray()) or made[-1])  # type: ignore[arg-type,func-returns-value]
+    [logo] = made
+    assert window.isVisible() and logo.visible
+    window.tray_action.setChecked(True)  # close-to-tray works with nothing pinned: the logo is the way back
+    monkeypatch.setattr(QApplication, "quit", lambda *a: None)
+    window.close()
+    assert window.isHidden() and window._thread.isRunning() and logo.visible
+    window.quit()  # really stop sampling: a close at teardown would only hide it again
+    assert not window._thread.isRunning()
+
+
+def test_starting_minimized_shows_corewatchs_icon(qtbot, settings) -> None:  # type: ignore[no-untyped-def]
+    window = make_window(qtbot, settings, SCRIPT)
+    made: list[FakeTray] = []
+    window.start(True, lambda: True, lambda: made.append(FakeTray()) or made[-1])  # type: ignore[arg-type,func-returns-value]
+    assert not window.isVisible() and made[0].visible
+
+
+def test_clicking_or_double_clicking_any_tray_icon_shows_the_window(qtbot, settings) -> None:  # type: ignore[no-untyped-def]
+    from PySide6.QtWidgets import QSystemTrayIcon
+
+    Reason = QSystemTrayIcon.ActivationReason
+    window = make_window(qtbot, settings, SCRIPT)
+    made: list[FakeTray] = []
+    window.attach_tray(lambda: made.append(FakeTray()) or made[-1])  # type: ignore[arg-type,func-returns-value]
+    window.set_pinned("gpu", True)
+    for tray in made:  # corewatch's own icon and a pinned sensor's
+        for reason in (Reason.DoubleClick, Reason.Trigger):
+            window.hide()
+            tray.activated.emit(reason)
+            assert window.isVisible()
+            tray.activated.emit(reason)  # already open: it stays open (Ubuntu reports a double click as Trigger)
+            assert window.isVisible()
+    window.hide()
+    made[0].activated.emit(Reason.Context)  # the right-click menu doesn't open the window
+    assert window.isHidden()
+
+
+def test_the_tray_logo_is_one_colour_to_suit_the_panel() -> None:
+    from corewatch.gui.app import TRAY_ICON_SIZES, panel_is_light, tray_icon
+
+    def colours(light_panel: bool) -> set[tuple[int, int, int]]:
+        image = tray_icon(light_panel).pixmap(64, 64).toImage()
+        seen = set()
+        for x in range(64):
+            for y in range(64):
+                pixel = image.pixelColor(x, y)
+                if pixel.alpha() == 255:
+                    seen.add((pixel.red(), pixel.green(), pixel.blue()))
+        return seen
+
+    assert colours(False) == {(255, 255, 255)}  # white, and nothing else, for a dark panel
+    assert colours(True) == {(0x18, 0x18, 0x1B)}
+    assert sorted(s.width() for s in tray_icon().availableSizes()) == sorted(TRAY_ICON_SIZES)
+    assert not panel_is_light("ubuntu:GNOME", Qt.ColorScheme.Light)  # GNOME's panel is black in light mode too
+    assert not panel_is_light("KDE", Qt.ColorScheme.Dark)
+    assert panel_is_light("KDE", Qt.ColorScheme.Light)
+    assert not panel_is_light("", Qt.ColorScheme.Unknown)
+
+
+def test_the_tray_shows_the_one_colour_logo(qtbot, settings) -> None:  # type: ignore[no-untyped-def]
+    window = make_window(qtbot, settings, SCRIPT)
+    icons: list[object] = []
+
+    class Tray(FakeTray):
+        def setIcon(self, icon) -> None:  # type: ignore[no-untyped-def]
+            super().setIcon(icon)
+            icons.append(icon)
+
+    window.attach_tray(Tray)  # type: ignore[arg-type]
+    pixel = icons[0].pixmap(64, 64).toImage().pixelColor(32, 32)  # type: ignore[attr-defined]
+    assert (pixel.red(), pixel.green(), pixel.blue()) == (255, 255, 255)  # the core, not the colour logo's amber

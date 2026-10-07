@@ -12,7 +12,18 @@ from importlib.resources import files
 from pathlib import Path
 
 from PySide6.QtCore import QByteArray, QObject, QPoint, QSettings, QSignalBlocker, Qt, QThread, QTimer, Signal, Slot
-from PySide6.QtGui import QAction, QActionGroup, QCloseEvent, QColor, QFont, QGuiApplication, QIcon, QPainter, QPixmap
+from PySide6.QtGui import (
+    QAction,
+    QActionGroup,
+    QCloseEvent,
+    QColor,
+    QFont,
+    QGuiApplication,
+    QIcon,
+    QPainter,
+    QPixmap,
+)
+from PySide6.QtSvg import QSvgRenderer
 from PySide6.QtWidgets import (
     QApplication,
     QButtonGroup,
@@ -50,8 +61,9 @@ SHUTDOWN_WAIT_MS = 3000
 TRAY_INFO_LINES = 5
 # The logo's size in the toolbar, where the app name used to be.
 LOGO_SIZE = 28
-# Key of the tray icon shown when no sensor is pinned: the CPU temperature.
-DEFAULT_TRAY = ""
+# Key of corewatch's own tray icon (its logo), which carries the window, reset and quit
+# actions. Pinned sensors get number icons of their own beside it.
+APP_TRAY = ""
 
 INTERVAL_PRESETS = (0.25, 0.5, 1.0, 2.0, 5.0, 10.0, 30.0, 60.0)
 
@@ -66,6 +78,37 @@ def app_icon() -> QIcon:
     """corewatch's own icon, bundled with the package so it shows even when it isn't installed
     into the desktop's icon theme."""
     return QIcon(str(files("corewatch") / "assets" / "corewatch.svg"))
+
+
+# Desktops whose top panel is dark whatever the light/dark setting.
+DARK_PANEL_DESKTOPS = ("gnome", "unity", "pantheon")
+TRAY_ICON_SIZES = (16, 22, 24, 32, 48, 64)
+
+
+def panel_is_light(desktop: str, scheme: Qt.ColorScheme) -> bool:
+    """Best guess at the tray's background, which no API reports. GNOME's panel is black even
+    in light mode; elsewhere (KDE, Xfce, ...) the panel usually follows the system scheme."""
+    if any(name in desktop.lower() for name in DARK_PANEL_DESKTOPS):
+        return False
+    return scheme == Qt.ColorScheme.Light
+
+
+def tray_icon(light_panel: bool = False) -> QIcon:
+    """The logo in one colour for the tray, like the desktop's own icons there: white on a dark
+    panel, near-black on a light one."""
+    svg = (files("corewatch") / "assets" / "corewatch-symbolic.svg").read_text()
+    if light_panel:
+        svg = svg.replace("#ffffff", "#18181b")
+    renderer = QSvgRenderer(QByteArray(svg.encode()))
+    icon = QIcon()
+    for size in TRAY_ICON_SIZES:
+        pixmap = QPixmap(size, size)
+        pixmap.fill(Qt.GlobalColor.transparent)
+        painter = QPainter(pixmap)
+        renderer.render(painter)
+        painter.end()
+        icon.addPixmap(pixmap)
+    return icon
 
 
 def number_icon(text: str, status: Status) -> QIcon:
@@ -161,6 +204,7 @@ class MainWindow(QMainWindow):
         self._tray_info: dict[str, list[QAction]] = {}
         self.trays: dict[str, QSystemTrayIcon] = {}
         self._quitting = False
+        self.light_panel = False  # set by run_gui from the desktop, before any theme override
 
         self.setWindowTitle("corewatch")
         self.setWindowIcon(app_icon())
@@ -256,54 +300,14 @@ class MainWindow(QMainWindow):
         self.reset_button.clicked.connect(self.reset_stats)
         toolbar.addWidget(self.reset_button)
 
+        self._make_option_actions()
         self.menu_button = QToolButton()
         self.menu_button.setText("⋯")
         self.menu_button.setToolTip("Options")
         self.menu_button.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
         menu = QMenu(self.menu_button)
-        theme_menu = menu.addMenu("Theme")
-        self.theme_actions = QActionGroup(self)
-        for key, text in (("system", "Follow system"), ("light", "Light"), ("dark", "Dark")):
-            action = theme_menu.addAction(text)
-            action.setCheckable(True)
-            action.setChecked(key == self.theme)
-            action.setData(key)
-            self.theme_actions.addAction(action)
-        self.theme_actions.triggered.connect(lambda action: self.apply_theme(str(action.data())))
-        self.unused_action = menu.addAction("Show unused sensors")
-        self.unused_action.setCheckable(True)
-        self.unused_action.setChecked(self.show_unused)
-        self.unused_action.setToolTip(
-            "Also list inputs with nothing attached: empty fan headers and unconnected temperature probes"
-        )
-        menu.setToolTipsVisible(True)
-        self.unused_action.toggled.connect(self.set_show_unused)
-        self.expand_action = menu.addAction("Expand all", self._expand_all)
-        self.collapse_action = menu.addAction("Collapse all", self._collapse_all)
-        menu.addSeparator()
-        self.tray_action = menu.addAction("Keep running in the tray when closed")
-        self.tray_action.setCheckable(True)
-        self.tray_action.setChecked(self.close_to_tray)
-        self.tray_action.toggled.connect(self._set_close_to_tray)
-        self.autostart_action = menu.addAction("Start when I log in")
-        self.autostart_action.setCheckable(True)
-        self.autostart_action.setToolTip("Start corewatch each time you log in to your desktop")
-        menu.aboutToShow.connect(self._sync_autostart)  # it can be changed outside corewatch too
-        self._sync_autostart()
-        self.autostart_action.toggled.connect(self.set_autostart)
-        self.minimized_action = menu.addAction("Start minimized in the tray")
-        self.minimized_action.setCheckable(True)
-        self.minimized_action.setChecked(self.start_minimized)
-        self.minimized_action.setToolTip(
-            "Start without opening this window; click the tray icon to open it. "
-            "Applies at login too. Without a system tray the window always opens."
-        )
-        self.minimized_action.toggled.connect(self._set_start_minimized)
-        menu.addSeparator()
-        quit_action = menu.addAction("Quit")
-        quit_action.setShortcut("Ctrl+Q")
-        quit_action.triggered.connect(self.quit)
-        self.addAction(quit_action)
+        self._add_options(menu)
+        self.addAction(self.quit_action)
         self.menu_button.setMenu(menu)
         toolbar.addWidget(self.menu_button)
 
@@ -350,6 +354,90 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.splitter, 1)
         self.setCentralWidget(central)
 
+    def _make_option_actions(self) -> None:
+        """The app's options as actions, shared by the ⋯ menu and the tray menu so both always
+        agree. The toolbar's controls (interval, units, min/max, reset) appear only in the tray."""
+        self.open_action = QAction("Open corewatch", self)
+        self.open_action.triggered.connect(self.show_window)
+        self.reset_action = QAction("Reset min/max", self)
+        self.reset_action.triggered.connect(self.reset_stats)
+
+        self.interval_actions = QActionGroup(self)
+        for index in range(self.interval_box.count()):
+            seconds = float(self.interval_box.itemData(index))
+            action = QAction(self.interval_box.itemText(index), self)
+            action.setCheckable(True)
+            action.setChecked(seconds == self.interval)
+            action.setData(seconds)
+            self.interval_actions.addAction(action)
+        self.interval_actions.triggered.connect(lambda action: self.set_interval(float(action.data()), remember=True))
+
+        self.unit_actions = QActionGroup(self)
+        for text, is_f in (("Celsius (°C)", False), ("Fahrenheit (°F)", True)):
+            action = QAction(text, self)
+            action.setCheckable(True)
+            action.setChecked(is_f == self.fahrenheit)
+            action.setData(is_f)
+            self.unit_actions.addAction(action)
+        self.unit_actions.triggered.connect(lambda action: self.set_fahrenheit(bool(action.data())))
+
+        self.min_max_action = QAction("Show min / max in the list", self)
+        self.min_max_action.setCheckable(True)
+        self.min_max_action.setChecked(self.show_min_max)
+        self.min_max_action.toggled.connect(self.set_show_min_max)
+
+        self.theme_actions = QActionGroup(self)
+        for key, text in (("system", "Follow system"), ("light", "Light"), ("dark", "Dark")):
+            action = QAction(text, self)
+            action.setCheckable(True)
+            action.setChecked(key == self.theme)
+            action.setData(key)
+            self.theme_actions.addAction(action)
+        self.theme_actions.triggered.connect(lambda action: self.apply_theme(str(action.data())))
+        self.unused_action = QAction("Show unused sensors", self)
+        self.unused_action.setCheckable(True)
+        self.unused_action.setChecked(self.show_unused)
+        self.unused_action.setToolTip(
+            "Also list inputs with nothing attached: empty fan headers and unconnected temperature probes"
+        )
+        self.unused_action.toggled.connect(self.set_show_unused)
+        self.expand_action = QAction("Expand all", self)
+        self.expand_action.triggered.connect(self._expand_all)
+        self.collapse_action = QAction("Collapse all", self)
+        self.collapse_action.triggered.connect(self._collapse_all)
+        self.tray_action = QAction("Keep running in the tray when closed", self)
+        self.tray_action.setCheckable(True)
+        self.tray_action.setChecked(self.close_to_tray)
+        self.tray_action.toggled.connect(self._set_close_to_tray)
+        self.autostart_action = QAction("Start when I log in", self)
+        self.autostart_action.setCheckable(True)
+        self.autostart_action.setToolTip("Start corewatch each time you log in to your desktop")
+        self._sync_autostart()
+        self.autostart_action.toggled.connect(self.set_autostart)
+        self.minimized_action = QAction("Start minimized in the tray", self)
+        self.minimized_action.setCheckable(True)
+        self.minimized_action.setChecked(self.start_minimized)
+        self.minimized_action.setToolTip(
+            "Start without opening this window; double-click the tray icon to open it. "
+            "Applies at login too. Without a system tray the window always opens."
+        )
+        self.minimized_action.toggled.connect(self._set_start_minimized)
+        self.quit_action = QAction("Quit", self)
+        self.quit_action.setShortcut("Ctrl+Q")
+        self.quit_action.triggered.connect(self.quit)
+
+    def _add_options(self, menu: QMenu) -> None:
+        """The options shared by the ⋯ menu and the tray menu, from theme down to Quit."""
+        theme_menu = menu.addMenu("Theme")
+        theme_menu.addActions(self.theme_actions.actions())
+        menu.addActions([self.unused_action, self.expand_action, self.collapse_action])
+        menu.addSeparator()
+        menu.addActions([self.tray_action, self.autostart_action, self.minimized_action])
+        menu.addSeparator()
+        menu.addAction(self.quit_action)
+        menu.setToolTipsVisible(True)
+        menu.aboutToShow.connect(self._sync_autostart)  # it can be changed outside corewatch too
+
     # ----- settings -----------------------------------------------------------------
 
     def set_interval(self, seconds: float, remember: bool = True) -> None:
@@ -357,6 +445,11 @@ class MainWindow(QMainWindow):
         if not math.isfinite(seconds):
             seconds = 1.0
         self.interval = min(max(seconds, MIN_INTERVAL), MAX_INTERVAL)
+        # Keep the toolbar and the tray menu showing the same choice, whichever made it.
+        with QSignalBlocker(self.interval_box):
+            self.interval_box.setCurrentIndex(self.interval_box.findData(self.interval))
+        for action in self.interval_actions.actions():
+            action.setChecked(float(action.data()) == self.interval)
         self.timer.start(round(self.interval * 1000))
         # A sample is "missing" (draw a gap) only if it is well overdue.
         self.gap = self.interval * 3 + 1
@@ -372,6 +465,8 @@ class MainWindow(QMainWindow):
 
     def set_show_min_max(self, show: bool) -> None:
         self.show_min_max = show
+        self.min_max_button.setChecked(show)
+        self.min_max_action.setChecked(show)
         self.settings.setValue("show_min_max", show)
         for section in self.sections.values():
             section.grid.set_show_min_max(show)
@@ -380,6 +475,8 @@ class MainWindow(QMainWindow):
         self.fahrenheit = fahrenheit
         self.celsius_button.setChecked(not fahrenheit)
         self.fahrenheit_button.setChecked(fahrenheit)
+        for action in self.unit_actions.actions():
+            action.setChecked(bool(action.data()) == fahrenheit)
         self.settings.setValue("fahrenheit", fahrenheit)
         self.redraw()
 
@@ -439,9 +536,9 @@ class MainWindow(QMainWindow):
         for it, out of sight, and only opens the window if no tray appears. Either way the
         tray is attached whenever it turns up, so close-to-tray works afterwards."""
         if tray_available():
-            self.attach_tray(tray_factory)
             if not minimized:
                 self.show_window()
+            self.attach_tray(tray_factory)
             return
         self._set_tray_options_available(False)
         if not (minimized and at_login):
@@ -467,7 +564,7 @@ class MainWindow(QMainWindow):
         """Starting minimized needs a tray to come back from; say so instead of silently failing."""
         self.minimized_action.setEnabled(available)
         self.minimized_action.setToolTip(
-            "Start without opening this window; click the tray icon to open it. Applies at login too."
+            "Start without opening this window; double-click the tray icon to open it. Applies at login too."
             if available
             else "Needs a system tray, and this desktop doesn't have one right now"
         )
@@ -640,11 +737,8 @@ class MainWindow(QMainWindow):
 
     def _tray_content(self, key: str) -> tuple[str, Status, str]:
         """(number on the icon, status, tooltip) for one tray icon."""
-        if key == DEFAULT_TRAY:
-            best = headline(self.plain_ordered)
-            reading = best.reading if best else None
-            text = format_short(Kind.TEMPERATURE, reading.value if reading else None, self.fahrenheit)
-            return text, reading.status if reading else Status.OK, "\n".join(["corewatch", *self._summary()])
+        if key == APP_TRAY:  # the logo; only its tooltip changes
+            return "", Status.OK, "\n".join(["corewatch", *self._summary()])
         row = self.rows.get(key)
         if row is None:  # the sensor went away (driver unloaded, GPU asleep)
             return "?", Status.OK, "corewatch\nThis pinned sensor isn't reporting right now"
@@ -666,10 +760,10 @@ class MainWindow(QMainWindow):
         return format_short(reading.kind, reading.value, self.fahrenheit), reading.status, tooltip
 
     def _update_tray(self) -> None:
-        """One icon per pinned sensor (the CPU temperature when nothing is pinned)."""
+        """corewatch's own icon, then one icon per pinned sensor."""
         if self._tray_factory is None:
             return
-        wanted = list(self.pinned) or [DEFAULT_TRAY]
+        wanted = [APP_TRAY, *self.pinned]
         for key in [key for key in self.trays if key not in wanted]:
             gone = self.trays.pop(key)
             gone.hide()
@@ -683,9 +777,9 @@ class MainWindow(QMainWindow):
                 tray = self.trays[key] = self._tray_factory()
                 menu = self._tray_menus[key] = self._tray_menu_for(key)
                 tray.setContextMenu(menu)
-                tray.activated.connect(
-                    lambda reason: self.toggle_visible() if reason == QSystemTrayIcon.ActivationReason.Trigger else None
-                )
+                tray.activated.connect(self._on_tray_activated)
+                if key == APP_TRAY:
+                    tray.setIcon(tray_icon(self.light_panel))
             text, status, tooltip = self._tray_content(key)
             unpin = self._tray_menus[key].property("unpin")
             if isinstance(unpin, QAction):
@@ -698,38 +792,51 @@ class MainWindow(QMainWindow):
                 for index, action in enumerate(self._tray_info.get(key, [])):
                     action.setText(lines[index] if index < len(lines) else "")
                     action.setVisible(index < len(lines))
-                tray.setIcon(number_icon(text, status))
+                if key != APP_TRAY:
+                    tray.setIcon(number_icon(text, status))
                 tray.setToolTip(tooltip)
             if not tray.isVisible():
                 tray.show()
 
+    def _on_tray_activated(self, reason: QSystemTrayIcon.ActivationReason) -> None:
+        """Clicking or double-clicking any of corewatch's icons brings the window up. Ubuntu's
+        panel opens the menu on a click and reports a double click as a click, so this never
+        hides the window (the menu's Show / hide window does)."""
+        if reason in (QSystemTrayIcon.ActivationReason.Trigger, QSystemTrayIcon.ActivationReason.DoubleClick):
+            self.show_window()
+
     def attach_tray(self, factory: Callable[[], QSystemTrayIcon]) -> None:
-        """``factory`` makes one tray icon; it's called once per pinned sensor."""
+        """``factory`` makes one tray icon; it's called for corewatch's own and once per pinned sensor."""
         self._tray_factory = factory
         self._update_tray()
         self._show_detail()  # pinning is possible now
         self._set_tray_options_available(True)
 
     def _tray_menu_for(self, key: str) -> QMenu:
-        """Each icon gets its own menu, so a pinned sensor can always be unpinned from its
-        icon, even after the sensor itself has stopped reporting."""
+        """corewatch's own icon has the app's actions. Each pinned sensor's icon has its own
+        menu, so it can always be unpinned from there, even after it has stopped reporting."""
         menu = QMenu(self)
-        if key != DEFAULT_TRAY:
-            # Ubuntu's panel shows no tooltips, so the name, min, max and average are also
-            # listed here, where every tray can show them. Updated with the tooltip.
-            info = [menu.addAction("") for _ in range(TRAY_INFO_LINES)]
-            menu.insertSeparator(info[1])  # between the group and the sensor
-            for action in info:
-                action.setEnabled(False)
-            self._tray_info[key] = info
+        if key == APP_TRAY:
+            # Ubuntu's panel opens this menu on a click, so opening the window has to be here.
+            menu.addAction(self.open_action)
             menu.addSeparator()
-            unpin = menu.addAction("Unpin this sensor", lambda: self.set_pinned(key, False))
-            menu.setProperty("unpin", unpin)
+            menu.addAction(self.reset_action)
+            menu.addMenu("Update every").addActions(self.interval_actions.actions())
+            menu.addMenu("Temperatures in").addActions(self.unit_actions.actions())
+            menu.addAction(self.min_max_action)
             menu.addSeparator()
-        menu.addAction("Show / hide window", self.toggle_visible)
-        menu.addAction("Reset min/max", self.reset_stats)
+            self._add_options(menu)
+            return menu
+        # Ubuntu's panel shows no tooltips, so the name, min, max and average are also
+        # listed here, where every tray can show them. Updated with the tooltip.
+        info = [menu.addAction("") for _ in range(TRAY_INFO_LINES)]
+        menu.insertSeparator(info[1])  # between the group and the sensor
+        for action in info:
+            action.setEnabled(False)
+        self._tray_info[key] = info
         menu.addSeparator()
-        menu.addAction("Quit", self.quit)
+        unpin = menu.addAction("Unpin this sensor", lambda: self.set_pinned(key, False))
+        menu.setProperty("unpin", unpin)
         return menu
 
     def set_pinned(self, key: str | None, pinned: bool) -> None:
@@ -817,12 +924,6 @@ class MainWindow(QMainWindow):
             return {}
         return {str(key): str(name) for key, name in stored.items() if str(name).strip()}
 
-    def toggle_visible(self) -> None:
-        if self.isVisible():
-            self.hide()
-        else:
-            self.show_window()
-
     def show_window(self) -> None:
         self.show()
         self.raise_()
@@ -839,7 +940,7 @@ class MainWindow(QMainWindow):
         ending_session = isinstance(app, QGuiApplication) and app.isSavingSession()
         if (
             self.close_to_tray
-            and any(tray.isVisible() for tray in self.trays.values())
+            and self._tray_factory is not None  # corewatch's own icon is there to come back with
             and not self._quitting
             and not ending_session
         ):
@@ -879,6 +980,8 @@ def run_gui(
     app.setWindowIcon(app_icon())
     app.setStyle("Fusion")
     app.setQuitOnLastWindowClosed(False)  # the tray may keep us alive; quitting is explicit
+    # Read now: once the window applies a chosen theme, the hint reports that instead.
+    light_panel = panel_is_light(os.environ.get("XDG_CURRENT_DESKTOP", ""), app.styleHints().colorScheme())
     # Already running? Bring that one forward (unless this start wants to stay out of sight)
     # and stop. Decided before anything slow, so two starts a moment apart can't both run.
     lock_path, socket_path = single.default_paths()
@@ -889,6 +992,7 @@ def run_gui(
         return 0
     monitor = Monitor(default_sources())
     window = MainWindow(monitor, QSettings(), interval=interval, fahrenheit=fahrenheit)
+    window.light_panel = light_panel
     single.InstanceServer(socket_path, window.show_window, window)
     app.aboutToQuit.connect(window.shutdown)
     with contextlib.suppress(autostart.AutostartError, OSError):

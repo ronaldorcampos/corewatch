@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256">
+  <title>corewatch</title>
+  <!-- The logo in one colour for the panel's tray, where full-colour icons stand out from the
+       desktop's own monochrome ones: the outer hex ring and the solid core. -->
+  <g fill="none" stroke="#ffffff" stroke-linejoin="round">
+    <polygon points="128.0,22.0 219.8,75.0 219.8,181.0 128.0,234.0 36.2,181.0 36.2,75.0" stroke-width="28"/>
+    <polygon points="128.0,84.0 166.1,106.0 166.1,150.0 128.0,172.0 89.9,150.0 89.9,106.0" fill="#ffffff" stroke-width="16"/>
+  </g>
+</svg>
