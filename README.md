@@ -28,8 +28,9 @@ load and power reading your machine exposes, refreshes them at an interval you c
   "CPU fan"); **Reset name** undoes it.
 - **Pin sensors to the tray.** Right-click a sensor and choose **Pin to tray**, or use the button
   in the detail panel. Each pinned sensor gets its own tray icon showing its number, like Core
-  Temp's per-core icons. With nothing pinned, one icon shows the CPU temperature. Right-click a
-  pinned icon to unpin it, which also works for a sensor that has stopped reporting (it shows "?").
+  Temp's per-core icons; hover over one to see its name, min, max and average. With nothing
+  pinned, one icon shows the CPU temperature. Right-click a pinned icon to unpin it, which also
+  works for a sensor that has stopped reporting (it shows "?").
 - **Noise hidden by default.** Empty motherboard fan headers and unconnected temperature probes are
   hidden (⋯ → Show unused sensors brings them back). A fan that stops after spinning is never
   hidden, and neither is anything in a warning state or a GPU fan idling at 0 RPM.

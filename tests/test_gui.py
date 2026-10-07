@@ -627,7 +627,7 @@ def test_pinned_sensors_get_their_own_tray_icons(qtbot, settings) -> None:  # ty
     window.set_pinned("cpu-load", True)
     assert list(window.trays) == ["gpu", "cpu-load"]
     assert not made[0].visible  # the default icon steps aside once something is pinned
-    assert made[1].tooltips[-1] == "GPU temperature · GPU · RTX\n41.0 °C"
+    assert made[1].tooltips[-1] == "GPU temperature\nmin: 41.0 °C\nmax: 41.0 °C\naverage: 41.0 °C"
     assert window._tray_states["cpu-load"][0] == "5"
     window._select("gpu")
     assert window.detail.pin_button.isChecked()
@@ -871,3 +871,16 @@ def test_start_minimized_is_offered_once_a_tray_exists(qtbot, settings) -> None:
     assert not window.minimized_action.isEnabled()
     ready.append(True)
     qtbot.waitUntil(window.minimized_action.isEnabled, timeout=2000)
+
+
+def test_pinned_tray_tooltip_shows_min_max_and_average(qtbot, settings) -> None:  # type: ignore[no-untyped-def]
+    window = make_window(qtbot, settings, SCRIPT)  # CPU package reads 50 °C, then 85 °C
+    made: list[FakeTray] = []
+    window.attach_tray(lambda: made.append(FakeTray()) or made[-1])  # type: ignore[arg-type,func-returns-value]
+    window.set_pinned("pkg", True)
+    window.refresh()
+    assert made[-1].tooltips[-1] == "CPU package\nmin: 50.0 °C\nmax: 85.0 °C\naverage: 67.5 °C"
+    window.set_fahrenheit(True)
+    assert made[-1].tooltips[-1] == "CPU package\nmin: 122.0 °F\nmax: 185.0 °F\naverage: 153.5 °F"
+    window.rename_sensor("pkg", "My CPU")
+    assert made[-1].tooltips[-1].startswith("My CPU\n")

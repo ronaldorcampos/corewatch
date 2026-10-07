@@ -633,8 +633,20 @@ class MainWindow(QMainWindow):
         row = self.rows.get(key)
         if row is None:  # the sensor went away (driver unloaded, GPU asleep)
             return "?", Status.OK, "corewatch\nThis pinned sensor isn't reporting right now"
-        reading = row.reading
-        tooltip = f"{reading.label} · {reading.device}\n{format_value(reading.kind, reading.value, self.fahrenheit)}"
+        reading, stats = row.reading, row.stats
+
+        def shown(value: float | None) -> str:
+            return format_value(reading.kind, value, self.fahrenheit)
+
+        # The icon already shows the current value; hovering adds how it has behaved.
+        tooltip = "\n".join(
+            [
+                reading.label,
+                f"min: {shown(stats.minimum)}",
+                f"max: {shown(stats.maximum)}",
+                f"average: {shown(stats.average)}",
+            ]
+        )
         return format_short(reading.kind, reading.value, self.fahrenheit), reading.status, tooltip
 
     def _update_tray(self) -> None:
