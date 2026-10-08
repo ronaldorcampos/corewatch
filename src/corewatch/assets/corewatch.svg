@@ -1,13 +1,12 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256">
   <title>corewatch</title>
-  <!-- Tile: zinc-900, the app's dark surface, with a faint edge so it keeps its shape on dark panels. -->
-  <rect x="2" y="2" width="252" height="252" rx="54" fill="#18181b" stroke="#3f3f46" stroke-width="4"/>
-  <!-- Hexagons, cool outside to hot inside. A same-colour stroke with round joins rounds their corners. -->
-  <g stroke-linejoin="round">
+  <!-- Hexagons, cool outside to hot inside, on a transparent background and scaled up to fill the
+       canvas like other launcher icons. A same-colour stroke with round joins rounds their corners. -->
+  <g stroke-linejoin="round" transform="translate(128 128) scale(1.2) translate(-128 -128)">
     <polygon points="128,36 207.7,82 207.7,174 128,220 48.3,174 48.3,82" fill="#1e40af" stroke="#1e40af" stroke-width="16"/>
     <polygon points="128,68 180,98 180,158 128,188 76,158 76,98" fill="#2563eb" stroke="#2563eb" stroke-width="12"/>
     <polygon points="128,98 154,113 154,143 128,158 102,143 102,113" fill="#f59e0b" stroke="#f59e0b" stroke-width="10"/>
+    <!-- The glowing centre. -->
+    <circle cx="128" cy="128" r="10" fill="#fef3c7"/>
   </g>
-  <!-- The glowing centre. -->
-  <circle cx="128" cy="128" r="10" fill="#fef3c7"/>
 </svg>
