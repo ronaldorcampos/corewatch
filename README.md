@@ -83,17 +83,19 @@ uv tool install git+https://github.com/ronaldorcampos/corewatch
 ```
 
 That puts `corewatch` in `~/.local/bin`. To add it to your app launcher (GNOME, KDE and others),
-install the desktop entry, pointing it at the full path because launchers don't always search
-`~/.local/bin`:
+first install its icon (the `touch` makes the desktop look again even if another app, such as
+Steam, has left an icon cache there that doesn't know about it yet):
+
+```bash
+curl -fsSL --create-dirs -o ~/.local/share/icons/hicolor/scalable/apps/corewatch.svg https://raw.githubusercontent.com/ronaldorcampos/corewatch/main/src/corewatch/assets/corewatch.svg && touch ~/.local/share/icons/hicolor
+```
+
+Then the desktop entry, pointing it at the full path because launchers don't always search
+`~/.local/bin`. Install it second: GNOME reloads its icons when the entry appears, so the icon
+needs to be in place by then:
 
 ```bash
 curl -fsSL --create-dirs -o ~/.local/share/applications/corewatch.desktop https://raw.githubusercontent.com/ronaldorcampos/corewatch/main/packaging/corewatch.desktop && sed -i "s|^Exec=corewatch\$|Exec=$HOME/.local/bin/corewatch|" ~/.local/share/applications/corewatch.desktop
-```
-
-And its icon, so the launcher shows it:
-
-```bash
-curl -fsSL --create-dirs -o ~/.local/share/icons/hicolor/scalable/apps/corewatch.svg https://raw.githubusercontent.com/ronaldorcampos/corewatch/main/src/corewatch/assets/corewatch.svg
 ```
 
 To update to the latest version later:
