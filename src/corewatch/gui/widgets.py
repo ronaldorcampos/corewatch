@@ -36,6 +36,7 @@ from corewatch.gui.theme import DISPLAY_FONT, MONO_FONT, Theme, current_theme, f
 from corewatch.model import (
     Kind,
     Row,
+    cap_word,
     format_delta,
     format_duration,
     format_limit,
@@ -364,7 +365,7 @@ class HistoryChart(QWidget):
             (reading.high, theme.warning, "high"),
             (reading.crit, theme.critical, "critical"),
             (reading.low, theme.warning, "low"),
-            (reading.cap, theme.muted, "limit"),  # informational: drawn, never alarming
+            (reading.cap, theme.muted, cap_word(reading.kind)),  # informational: drawn, never alarming
         ):
             if limit is not None and low <= limit <= high:
                 pen = QPen(QColor(color), 1, Qt.PenStyle.DashLine)
@@ -535,6 +536,46 @@ def expand_icon(color: str) -> QIcon:
             corner = QPointF(x, y)
             painter.drawLine(corner, QPointF(x + dx * arm, y))
             painter.drawLine(corner, QPointF(x, y + dy * arm))
+        painter.end()
+        icon.addPixmap(pixmap)
+    return icon
+
+
+def chevron_icon(color: str, up: bool) -> QIcon:
+    """A chevron pointing up (the sensor before) or down (the one after)."""
+    icon = QIcon()
+    for size in (16, 32):
+        pixmap = QPixmap(size, size)
+        pixmap.fill(Qt.GlobalColor.transparent)
+        painter = QPainter(pixmap)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setPen(QPen(QColor(color), size / 9, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+        rise = size * 0.16 * (1 if up else -1)
+        middle = size / 2
+        tip = QPointF(middle, middle - rise)
+        painter.drawLine(QPointF(size * 0.22, middle + rise), tip)
+        painter.drawLine(tip, QPointF(size * 0.78, middle + rise))
+        painter.end()
+        icon.addPixmap(pixmap)
+    return icon
+
+
+def pencil_icon(color: str) -> QIcon:
+    """A pencil, point down to the left: edit the name beside it."""
+    icon = QIcon()
+    for size in (16, 32):
+        pixmap = QPixmap(size, size)
+        pixmap.fill(Qt.GlobalColor.transparent)
+        painter = QPainter(pixmap)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setPen(QPen(QColor(color), size / 12, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+        painter.translate(size / 2, size / 2)
+        painter.rotate(-45)
+        half, body, tip = size * 0.11, size * 0.30, size * 0.44
+        painter.drawRect(QRectF(-body, -half, body * 2, half * 2))  # the shaft
+        painter.drawLine(QPointF(body - size * 0.1, -half), QPointF(body - size * 0.1, half))  # the eraser's band
+        painter.drawLine(QPointF(-body, -half), QPointF(-tip, 0))  # the point
+        painter.drawLine(QPointF(-body, half), QPointF(-tip, 0))
         painter.end()
         icon.addPixmap(pixmap)
     return icon

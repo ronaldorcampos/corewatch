@@ -22,6 +22,7 @@ def fake_nvml(**overrides: Any) -> SimpleNamespace:
         "nvmlDeviceGetEnforcedPowerLimit": 200000,
         "nvmlDeviceGetPowerUsage": 29660,
         "nvmlDeviceGetClockInfo": lambda h, clock: {0: 2475, 2: 10501}[clock],
+        "nvmlDeviceGetMaxClockInfo": lambda h, clock: {0: 3105, 2: 10501}[clock],
         "nvmlDeviceGetUtilizationRates": SimpleNamespace(gpu=16),
         "nvmlDeviceGetMemoryInfo": SimpleNamespace(used=3 * 2**30, total=12 * 2**30),
     } | overrides
@@ -65,8 +66,8 @@ def test_reads_every_gpu_sensor() -> None:
         ("Fan 1 speed", Kind.FAN_DUTY, 71, None, None, None),
         ("Fan 2 speed", Kind.FAN_DUTY, 69, None, None, None),
         ("Power draw", Kind.POWER, 29.66, None, None, 200.0),
-        ("Graphics clock", Kind.CLOCK, 2475, None, None, None),
-        ("Memory clock", Kind.CLOCK, 10501, None, None, None),
+        ("Graphics clock", Kind.CLOCK, 2475, None, None, 3105.0),
+        ("Memory clock", Kind.CLOCK, 10501, None, None, 10501.0),
         ("GPU load", Kind.LOAD, 16.0, None, None, None),
         ("Video memory used", Kind.LOAD, 25.0, None, None, None),
     ]

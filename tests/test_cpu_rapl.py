@@ -115,6 +115,31 @@ def test_rapl_power_from_energy_delta_with_wraparound(tmp_path: Path, proc_root:
     assert source.notes() == []
 
 
+def test_rapl_package_limit_is_the_higher_of_its_sustained_and_boost_limits(tmp_path: Path, proc_root: Path) -> None:
+    root = tmp_path / "powercap"
+    zone = {
+        "intel-rapl:0/name": "package-0",
+        "intel-rapl:0/energy_uj": "0",
+        "intel-rapl:0/constraint_0_name": "long_term",
+        "intel-rapl:0/constraint_0_power_limit_uw": "125000000",
+        "intel-rapl:0/constraint_1_name": "short_term",
+        "intel-rapl:0/constraint_1_power_limit_uw": "253000000",
+        "intel-rapl:0/constraint_2_name": "peak_power",  # a current safeguard, never held
+        "intel-rapl:0/constraint_2_power_limit_uw": "380000000",
+        "intel-rapl:0:0/name": "core",
+        "intel-rapl:0:0/energy_uj": "0",
+        "intel-rapl:0:0/constraint_0_name": "long_term",
+        "intel-rapl:0:0/constraint_0_power_limit_uw": "90000000",
+    }
+    write_tree(root, zone)
+    source = RaplSource(root=root, proc_root=proc_root, clock=FakeClock())
+    assert {r.label: r.cap for r in source.sample()} == {"Package power": 253.0, "Cores power": None}
+    write_tree(root, {"intel-rapl:0/constraint_1_power_limit_uw": "4095875000"})  # "no limit"
+    assert {r.label: r.cap for r in source.sample()}["Package power"] is None
+    write_tree(root, {"intel-rapl:0/constraint_1_power_limit_uw": "65000000"})  # a profile lowered it
+    assert {r.label: r.cap for r in source.sample()}["Package power"] == 125.0
+
+
 def test_rapl_permission_denied_becomes_a_note(tmp_path: Path, proc_root: Path) -> None:
     root = tmp_path / "powercap"
     write_tree(root, {"intel-rapl:0/name": "package-0", "intel-rapl:0/energy_uj": "1"})

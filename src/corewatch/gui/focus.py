@@ -35,12 +35,22 @@ from PySide6.QtWidgets import (
 from corewatch.gui.cards import CompactView, Item, ViewData
 from corewatch.gui.overview import core_groups, heat_band, split_value
 from corewatch.gui.theme import BODY_FONT, DISPLAY_FONT, MONO_FONT, Theme, current_theme, font, paint_card, px
-from corewatch.gui.widgets import DetailPanel, ElidedLabel, HistoryChart, _clock, drawable_segments, value_range
+from corewatch.gui.widgets import (
+    DetailPanel,
+    ElidedLabel,
+    HistoryChart,
+    _clock,
+    chevron_icon,
+    drawable_segments,
+    pencil_icon,
+    value_range,
+)
 from corewatch.model import (
     Kind,
     Reading,
     Row,
     Status,
+    cap_word,
     format_delta,
     format_duration,
     format_trend,
@@ -53,13 +63,14 @@ HEAT_WORDS = ("cool", "mild", "warm", "hot")
 
 def dial_full_scale(reading: Reading) -> float | None:
     """What a full dial stands for, counting from zero; None for a sensor with no natural scale
-    (a voltage, a clock, a fan's RPM, traffic), which gets its number without a ring."""
+    (a voltage, a clock with no top speed reported, a fan's RPM, traffic), which gets its number
+    without a ring."""
     if reading.kind is Kind.TEMPERATURE:
         top = reading.crit if reading.crit is not None else reading.high
         return max(100.0, (top if top is not None else 0.0) + 10.0)
     if reading.kind in (Kind.LOAD, Kind.FAN_DUTY):
         return 100.0
-    if reading.kind is Kind.POWER and reading.cap:
+    if reading.kind in (Kind.POWER, Kind.CLOCK) and reading.cap:  # its limit, or a card's top clock
         return reading.cap
     return None
 
@@ -87,7 +98,8 @@ def headroom(reading: Reading, fahrenheit: bool) -> tuple[str, str]:
     low = reading.low
     if low is not None and value < low:  # a fan too slow, a rail sagging
         return gap(low - value), "below the low limit"
-    uppers = ((reading.high, "the high limit"), (reading.crit, "critical"), (reading.cap, "its limit"))
+    cap = f"its {cap_word(reading.kind)}"  # a power limit, or a card's top clock
+    uppers = ((reading.high, "the high limit"), (reading.crit, "critical"), (reading.cap, cap))
     upper = next(((limit, name) for limit, name in uppers if limit is not None), None)
     if upper is not None:
         limit, name = upper
@@ -548,6 +560,23 @@ def _window_text(seconds: float) -> str:
 # ----- the view -----------------------------------------------------------------------------
 
 
+class _Page(QWidget):
+    """The focus view's scrolled page. Its minimum height is what its parts take at the width it
+    has: the layout's own minimum stacks each part at its narrowest (the core strip one core to a
+    line), which the scroll area would honour as a long blank tail to scroll through."""
+
+    def minimumSizeHint(self) -> QSize:
+        hint = super().minimumSizeHint()
+        layout = self.layout()
+        if layout is None or not layout.hasHeightForWidth():
+            return hint
+        return QSize(hint.width(), layout.totalHeightForWidth(max(self.width(), hint.width())))
+
+    def resizeEvent(self, event: QResizeEvent) -> None:
+        super().resizeEvent(event)
+        self.updateGeometry()
+
+
 class FocusView(QWidget):
     """One sensor across the whole window. ``back`` returns to the overview; a click on a core in
     the strip focuses on that core instead (``selected``); ``stepped`` asks for the sensor before
@@ -583,9 +612,10 @@ class FocusView(QWidget):
         self.step_buttons: dict[int, QPushButton] = {}
         steps = QHBoxLayout()
         steps.setSpacing(4)
-        for step, text, keys in ((-1, "‹", "Ctrl+PgUp"), (1, "›", "Ctrl+PgDown")):  # noqa: RUF001
-            button = QPushButton(text)
+        for step, keys in ((-1, "Ctrl+PgUp"), (1, "Ctrl+PgDown")):
+            button = QPushButton()
             button.setObjectName("iconButton")
+            button.setIcon(chevron_icon(current_theme().muted, up=step < 0))
             button.clicked.connect(lambda _=False, step=step: self.stepped.emit(step))
             steps.addWidget(button)
             self.step_buttons[step] = button
@@ -603,7 +633,18 @@ class FocusView(QWidget):
         self.title = ElidedLabel("", shortest=60)
         self.title.setObjectName("focusTitle")
         titles.addWidget(self.device)
-        titles.addWidget(self.title)
+        name = QHBoxLayout()
+        name.setSpacing(6)
+        name.addWidget(self.title)
+        self.rename_button = QPushButton()  # a pencil right after the name it edits
+        self.rename_button.setObjectName("rename")
+        self.rename_button.setIcon(pencil_icon(current_theme().muted))
+        self.rename_button.setAccessibleName("Rename")
+        self.rename_button.setToolTip("Rename: give this sensor your own name")
+        self.rename_button.clicked.connect(lambda: self.key is not None and self.rename_requested.emit(self.key))
+        name.addWidget(self.rename_button)
+        name.addStretch(1)
+        titles.addLayout(name)
         header.addLayout(titles, 1)
         self.window_buttons = QButtonGroup(self)
         self.window_buttons.setExclusive(True)
@@ -616,10 +657,6 @@ class FocusView(QWidget):
             button.clicked.connect(lambda _=False, s=seconds: self._choose_window(s))
             self.window_buttons.addButton(button)
             header.addWidget(button)
-        self.rename_button = QPushButton("Rename")
-        self.rename_button.setToolTip("Give this sensor your own name")
-        self.rename_button.clicked.connect(lambda: self.key is not None and self.rename_requested.emit(self.key))
-        header.addWidget(self.rename_button)
         self.pin_button = QPushButton("Pin to tray")
         self.pin_button.setCheckable(True)
         self.pin_button.toggled.connect(self._on_pin_toggled)
@@ -631,7 +668,7 @@ class FocusView(QWidget):
         self.scroll_area.setWidgetResizable(True)
         self.scroll_area.setFrameShape(QScrollArea.Shape.NoFrame)
         self.scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        body = QWidget()
+        body = _Page()
         body.setObjectName("listContainer")
         page = QVBoxLayout(body)
         page.setContentsMargins(0, 0, 4, 12)

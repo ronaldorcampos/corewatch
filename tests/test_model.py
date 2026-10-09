@@ -1,3 +1,5 @@
+from dataclasses import replace
+
 import pytest
 
 from corewatch.model import (
@@ -147,3 +149,4 @@ def test_cap_is_shown_but_never_a_warning() -> None:
     capped = Reading("k", "d", "Power draw", Kind.POWER, 120.0, cap=100.0)
     assert capped.status is Status.OK
     assert format_limit(capped) == "limit 100.0 W"
+    assert format_limit(replace(capped, kind=Kind.CLOCK, cap=3255.0)) == "max 3,255 MHz"  # a clock's top speed

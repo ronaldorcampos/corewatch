@@ -16,8 +16,9 @@ load and power reading your machine exposes, refreshes them at an interval you c
 
 - **Overview gauges** across the top for the numbers you check most: CPU temperature (with the
   hottest core), GPU temperature (with the card's other temperatures, like hotspot and memory),
-  CPU load (with the busiest core and the fastest core's clock) and CPU + GPU power (the ring split
-  between the two). With a graphics card next to integrated graphics, the gauges follow the card;
+  CPU load (with the busiest core and the fastest core's clock) and CPU + GPU power (the ring fills
+  against the CPU's and the card's power limits added together, in two colours, one per part; if
+  either limit isn't reported, the ring splits the total between them instead). With a graphics card next to integrated graphics, the gauges follow the card;
   integrated graphics' power is never added to the CPU's, since the CPU's figure already includes
   it. Click a gauge (or Tab to it and press Enter) to open that sensor in the detail drawer. A gauge
   only appears if your hardware reports its sensor.
@@ -57,17 +58,18 @@ load and power reading your machine exposes, refreshes them at an interval you c
 - **Focus view.** Double-click any sensor (in a card, a gauge or the heat map), or use the focus
   button in the detail drawer, to see it across the whole window:
   - a dial with the reading against its scale, its high limit marked and its critical zone
-    shaded. Sensors with no natural scale (voltages, clocks, fan RPM, traffic) show the number
+    shaded. A power reading fills against its limit, and an NVIDIA card's clocks against their top
+    speed. Sensors with no natural scale (voltages, CPU clocks, fan RPM, traffic) show the number
     alone;
   - the headroom to its limit, and which way it's heading;
   - a large chart that always keeps the limits in view, with its peak and a 1-minute average;
   - every statistic, each with a word on what it means.
 
   For a CPU sensor, **Every core** charts each core's temperature over the same minutes on one
-  scale, with its peak and clock; click a core to focus on it. Rename and Pin to tray work from
-  here too. **‹ ›** (or Ctrl+PgUp and Ctrl+PgDn) step to the previous or next sensor in the
-  overview's order, without going back. Esc or **Back** goes back, and so does typing in the
-  filter.
+  scale, with its peak and clock; click a core to focus on it. The pencil beside the name renames
+  it, and Pin to tray works from here too. The up and down arrows beside **Back** (or Ctrl+PgUp
+  and Ctrl+PgDn) step to the previous or next sensor in the overview's order, without going back.
+  Esc or **Back** goes back, and so does typing in the filter.
 - **Readable names.** Intel hybrid CPUs show P-core 0-7 and E-core 0-7 instead of the kernel's
   gappy core IDs. Nuvoton motherboard chips get named voltage rails (Vcore, +12V, +5V, +3.3V, ...).
   Right-click any sensor and choose **Rename…** to give it your own name (handy for "Fan 2" →
@@ -109,9 +111,9 @@ load and power reading your machine exposes, refreshes them at an interval you c
 | AMD CPUs (`k10temp`, optional `zenpower`) | CPU temperature (the real die temperature, plus the fan-control value where the chip reports both) and one temperature per chiplet (CCD); AMD reports no per-core temperatures. With `zenpower` (Zen 1-3), core and SoC voltages, currents and power |
 | AMD GPUs (`amdgpu`) | GPU, hotspot and memory temperatures (warning at the throttle point, critical at shutdown), fan speed (RPM and %), core voltage, graphics and memory clocks, power draw against its cap, load and video memory, under the card's model name |
 | `/proc/stat`, cpufreq | Load and clock speed per physical core |
-| RAPL (`/sys/class/powercap`) | CPU package and core power draw on Intel and AMD Zen, and Intel integrated graphics power (needs one permission tweak, see below) |
+| RAPL (`/sys/class/powercap`) | CPU package and core power draw on Intel and AMD Zen, and Intel integrated graphics power (needs one permission tweak, see below). The package's power limit (the higher of its sustained and boost limits, as the firmware or a power profile sets them) is shown for reference, not as a warning |
 | Intel graphics (`i915`, `xe`) | Graphics clock and active time (the share of time it isn't asleep) for integrated graphics and Arc cards. **Integrated:** power draw from RAPL; it has no temperature sensor of its own, so its heat shows in the CPU package temperature, and if it's switched off in the BIOS only its power draw appears, under the CPU. **Arc:** power draw against its limit and core voltage, plus fan speeds and GPU and memory temperatures where the kernel reports them (fans from about Linux 6.12, temperatures on Battlemage with `xe`). corewatch never keeps an idle Intel GPU awake: while nothing is using it, it shows 0 MHz and 0 % without reading it, and an Arc card's sensors stay blank until it's in use |
-| NVIDIA NVML | GPU temperature, fan speeds (RPM and %), power draw (the power limit is shown for reference, not as a warning), graphics and memory clocks, load, video memory |
+| NVIDIA NVML | GPU temperature, fan speeds (RPM and %), power draw (the power limit is shown for reference, not as a warning), graphics and memory clocks (with the card's top clock for each), load, video memory |
 | NVIDIA NvAPI (`libnvidia-api.so.1`) | GPU hotspot and memory (VRAM) temperatures, which NVML doesn't expose. Uses the same driver calls as [LACT](https://github.com/ilya-zlobintsev/LACT); works as a normal user on RTX 20-40 cards |
 | `/sys/class/net` | Download and upload rates for each physical network interface with a link (Docker bridges, loopback and unplugged ports are left out) |
 

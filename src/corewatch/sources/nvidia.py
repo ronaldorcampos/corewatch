@@ -154,8 +154,13 @@ class NvidiaSource:
             # Running at the power limit is normal under load: show it, don't warn about it.
             cap=power_limit / 1000 if power_limit else None,
         )
-        add("clock/graphics", "Graphics clock", Kind.CLOCK, "nvmlDeviceGetClockInfo", nvml.NVML_CLOCK_GRAPHICS)
-        add("clock/memory", "Memory clock", Kind.CLOCK, "nvmlDeviceGetClockInfo", nvml.NVML_CLOCK_MEM)
+        for key, label, clock in (
+            ("clock/graphics", "Graphics clock", nvml.NVML_CLOCK_GRAPHICS),
+            ("clock/memory", "Memory clock", nvml.NVML_CLOCK_MEM),
+        ):
+            # The card's top clock, like the power limit: a scale to read it against, not a warning.
+            _, top = self._call("nvmlDeviceGetMaxClockInfo", handle, clock)
+            add(key, label, Kind.CLOCK, "nvmlDeviceGetClockInfo", clock, cap=float(top) if top else None)
 
         supported, utilization = self._call("nvmlDeviceGetUtilizationRates", handle)
         if supported:

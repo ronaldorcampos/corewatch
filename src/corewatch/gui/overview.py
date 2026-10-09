@@ -172,15 +172,17 @@ def power_gauge(rows: Sequence[Row], gpu_device: str | None, fahrenheit: bool) -
         known = [w for w in (cpu.value, gpu.value) if w is not None]
         total = sum(known)
         both = len(known) == 2
-        return GaugeSpec(
-            "CPU + GPU power",
-            cpu.key,
-            # A card that isn't reporting (an idle Arc leaves it blank) doesn't blank the CPU's.
-            *split_value(Kind.POWER, total if known else None, fahrenheit),
-            "CPU | GPU",
-            (f"CPU {format_value(Kind.POWER, cpu.value)}", f"GPU {format_value(Kind.POWER, gpu.value)}"),
-            ((_fraction(cpu.value, total), AMBER), (_fraction(gpu.value, total), ACCENT)) if both and total else (),
-        )
+        each = (f"CPU {format_value(Kind.POWER, cpu.value)}", f"GPU {format_value(Kind.POWER, gpu.value)}")
+        # A card that isn't reporting (an idle Arc leaves it blank) doesn't blank the CPU's.
+        value = split_value(Kind.POWER, total if known else None, fahrenheit)
+        if cpu.cap and gpu.cap:  # a full ring is both at their limits; each arc is its share of that
+            full = cpu.cap + gpu.cap
+            cpu_part = _fraction(cpu.value, full)
+            arcs = ((cpu_part, AMBER), (min(_fraction(gpu.value, full), 1.0 - cpu_part), ACCENT))
+            return GaugeSpec("CPU + GPU power", cpu.key, *value, f"of {full:g} W", each, arcs)
+        # Without both limits there's no full to measure against: the ring splits the total instead.
+        split = ((_fraction(cpu.value, total), AMBER), (_fraction(gpu.value, total), ACCENT)) if both and total else ()
+        return GaugeSpec("CPU + GPU power", cpu.key, *value, "CPU | GPU", each, split)
     watts = cpu or gpu
     if watts is None:
         return None

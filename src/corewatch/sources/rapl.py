@@ -36,6 +36,22 @@ class Zone:
     device: str
     previous: tuple[int, float] | None = None
     integrated: bool = False  # the integrated GPU's zone, filed under its card
+    package: bool = False  # a whole CPU package: the one with the power limits
+
+
+def package_limit(zone: Path) -> float | None:
+    """A package's power limit in watts: the higher of its sustained (long_term, PL1) and boost
+    (short_term, PL2) limits, since a busy CPU holds the boost one for as long as its boost lasts.
+    peak_power (PL4) is a current safeguard it never sustains, so it's left out. Firmware that
+    sets no real limit writes a huge one (4095 W); that's no limit."""
+    limits = []
+    for name in sorted(zone.glob("constraint_*_name")):
+        if read_text(name) in ("long_term", "short_term"):
+            microwatts = read_int(name.with_name(name.name.removesuffix("_name") + "_power_limit_uw"))
+            if microwatts:
+                limits.append(microwatts / 1_000_000)
+    watts = max(limits, default=None)
+    return watts if watts is not None and watts <= MAX_PLAUSIBLE_WATTS else None
 
 
 def _label(name: str) -> str:
@@ -80,7 +96,7 @@ class RaplSource:
             if integrated is not None and name == "uncore":
                 self.zones.append(Zone(entry, "Power draw", max_range, integrated.device, integrated=True))
             else:
-                self.zones.append(Zone(entry, _label(name), max_range, self.device))
+                self.zones.append(Zone(entry, _label(name), max_range, self.device, package=name.startswith("package")))
         self.sample()  # prime the counters
 
     def sample(self) -> list[Reading]:
@@ -110,6 +126,8 @@ class RaplSource:
                     kind=Kind.POWER,
                     value=value,
                     integrated=zone.integrated,
+                    # Read every time: a power profile or thermald can move it while we watch.
+                    cap=package_limit(zone.path) if zone.package else None,
                 )
             )
         return readings

@@ -260,8 +260,13 @@ def format_limit(reading: Reading, fahrenheit: bool = False) -> str:
     if reading.crit is not None:
         parts.append(f"crit {format_value(reading.kind, reading.crit, fahrenheit)}")
     if reading.cap is not None:
-        parts.append(f"limit {format_value(reading.kind, reading.cap, fahrenheit)}")
+        parts.append(f"{cap_word(reading.kind)} {format_value(reading.kind, reading.cap, fahrenheit)}")
     return " · ".join(parts)
+
+
+def cap_word(kind: Kind) -> str:
+    """What a reading's cap is called: a clock's is its top speed, anything else's a limit."""
+    return "max" if kind is Kind.CLOCK else "limit"
 
 
 def format_delta(kind: Kind, delta: float | None, fahrenheit: bool = False, signed: bool = True) -> str:

@@ -1663,6 +1663,22 @@ def test_two_cards_take_temperature_and_power_from_the_same_one() -> None:
     assert (specs["GPU power"].key, specs["GPU power"].caption) == ("nv/power", "of 200 W")
 
 
+def test_cpu_and_gpu_power_fill_the_ring_against_both_limits() -> None:
+    from corewatch.gui.overview import power_gauge
+
+    package = _reading("rapl/0", CPU, "Package power", Kind.POWER, 99.0, cap=253.0)
+    card = _reading("nv/power", GPU, "Power draw", Kind.POWER, 28.0, cap=100.0)
+    spec = power_gauge(_rows([package, card]), GPU, fahrenheit=False)
+    assert spec is not None and (spec.value, spec.caption) == ("127.0", "of 353 W")
+    assert [role for _, role in spec.arcs] == ["amber", "accent"]
+    assert [f for f, _ in spec.arcs] == pytest.approx([99 / 353, 28 / 353])  # the rest of the ring is headroom
+    over = power_gauge(_rows([replace(package, value=300.0), replace(card, value=120.0)]), GPU, False)
+    assert over is not None and sum(f for f, _ in over.arcs) == pytest.approx(1.0)  # past both: a full ring, no more
+    no_cap = power_gauge(_rows([replace(package, cap=None), card]), GPU, fahrenheit=False)
+    assert no_cap is not None and no_cap.caption == "CPU | GPU"  # one limit unknown: the split, as before
+    assert sum(f for f, _ in no_cap.arcs) == pytest.approx(1.0)
+
+
 def test_power_gauge_without_a_cap_or_with_a_reading_missing() -> None:
     from corewatch.gui.overview import power_gauge
 
@@ -2356,9 +2372,11 @@ def test_dial_scale_words_and_headroom() -> None:
         dial_full_scale(r(Kind.LOAD, 5.0)),
         dial_full_scale(r(Kind.FAN_DUTY, 5.0)),
         dial_full_scale(r(Kind.POWER, 53.9, cap=150.0)),
-    ] == [110.0, 115.0, 100.0, 100.0, 100.0, 100.0, 150.0]
+        dial_full_scale(r(Kind.CLOCK, 2475.0, cap=3105.0)),  # a card's top clock
+    ] == [110.0, 115.0, 100.0, 100.0, 100.0, 100.0, 150.0, 3105.0]
     no_scale = [r(Kind.POWER, 53.9), r(Kind.POWER, 5.0, cap=0.0), r(Kind.VOLTAGE, 1.2), r(Kind.FAN, 900.0)]
-    assert [dial_full_scale(reading) for reading in no_scale] == [None] * 4  # a cap of 0 is no scale
+    no_scale.append(r(Kind.CLOCK, 4800.0))  # a CPU core's, with no top reported
+    assert [dial_full_scale(reading) for reading in no_scale] == [None] * 5  # a cap of 0 is no scale
 
     assert [reading_word(r(Kind.TEMPERATURE, v, high=80.0, crit=100.0)) for v in (35.0, 45.0, 55.0, 72.0)] == [
         "cool",
@@ -2378,6 +2396,7 @@ def test_dial_scale_words_and_headroom() -> None:
     assert headroom(r(Kind.TEMPERATURE, 85.0, high=80.0), False) == ("5.0 °C", "past the high limit")
     assert headroom(r(Kind.TEMPERATURE, 60.0, crit=100.0), False) == ("40.0 °C", "to critical")
     assert headroom(r(Kind.POWER, 53.9, cap=100.0), False) == ("46.1 W", "to its limit")
+    assert headroom(r(Kind.CLOCK, 2055.0, cap=3255.0), False) == ("1,200 MHz", "to its max")
     assert headroom(r(Kind.VOLTAGE, 3.3, low=3.0), False) == ("0.300 V", "above the low limit")
     assert headroom(r(Kind.CLOCK, 5300.0), False) == ("—", "no limit reported")
     assert headroom(r(Kind.TEMPERATURE, None, high=80.0), False) == ("—", "no reading")
@@ -2583,6 +2602,8 @@ def test_focus_view_renames_pins_and_steps_to_another_core(qtbot, settings, monk
     window.open_focus("pkg")
     focus = window.focus
     monkeypatch.setattr(window, "_ask_name", lambda current: "Package")
+    title, pencil = focus.title.geometry(), focus.rename_button.geometry()
+    assert pencil.left() > title.right() and abs(pencil.center().y() - title.center().y()) < 6  # beside the name
     focus.rename_button.click()
     assert focus.title.text() == "Package" and window.names == {"pkg": "Package"}
     assert focus.pin_button.isEnabled() and not focus.pin_button.isChecked()
@@ -2631,6 +2652,24 @@ def test_focus_view_fits_the_narrowest_window(qtbot, settings) -> None:  # type:
     window.resize(1300, 900)
     qtbot.waitUntil(lambda: window.width() == 1300)
     assert focus.top.direction() == QBoxLayout.Direction.LeftToRight
+
+
+def test_the_focus_page_scrolls_only_as_far_as_its_content(qtbot, settings) -> None:  # type: ignore[no-untyped-def]
+    window = _open_window(qtbot, settings)
+    window.resize(1300, 1100)
+    window.open_focus("gpu")
+    QApplication.processEvents()
+    scroll = window.focus.scroll_area.verticalScrollBar()
+    assert scroll.maximum() == 0  # it all fits: no scroll bar
+    window.open_focus("pkg")  # the core strip, one core to a line at its narrowest, isn't stacked so
+    window.resize(1300, 700)
+    qtbot.waitUntil(lambda: window.height() == 700)
+    QApplication.processEvents()
+    page = window.focus.scroll_area.widget()
+    assert (
+        page.layout().totalHeightForWidth(page.width()) >= page.height() > window.focus.scroll_area.viewport().height()
+    )
+    assert scroll.maximum() == page.height() - window.focus.scroll_area.viewport().height()
 
 
 def test_the_open_drawer_fits_the_narrowest_window(qtbot, settings) -> None:  # type: ignore[no-untyped-def]

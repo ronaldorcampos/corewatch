@@ -309,6 +309,8 @@ def stylesheet(t: Theme) -> str:
     }}
     QPushButton#back {{ padding: 10px 16px; }}
     QPushButton#iconButton {{ padding: 6px 8px; }}
+    QPushButton#rename {{ background: transparent; border: 1px solid transparent; padding: 4px; }}
+    QPushButton#rename:hover {{ border-color: {t.accent}; }}
     QMenu {{ background: {t.raised}; border: 1px solid {t.border}; padding: 6px 0; }}
     QMenu::item {{ padding: 8px 22px 8px 16px; }}
     QMenu::item:selected {{ background: {t.accent_soft}; color: {t.text}; }}

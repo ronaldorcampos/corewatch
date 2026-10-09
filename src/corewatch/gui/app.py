@@ -72,7 +72,7 @@ from corewatch.gui.cards import CardDeck, ViewData, card_rank, is_wide, view_for
 from corewatch.gui.focus import FocusView
 from corewatch.gui.overview import GaugeStrip, gauge_specs
 from corewatch.gui.sensors import CategorySection, SensorGrid
-from corewatch.gui.widgets import DetailPanel, expand_icon
+from corewatch.gui.widgets import DetailPanel, chevron_icon, expand_icon, pencil_icon
 from corewatch.model import Kind, Row, Status, format_short, format_value
 from corewatch.monitor import Collected, Monitor, gather_fans, gather_storage, group_rows, headline
 from corewatch.sources import default_sources
@@ -635,6 +635,9 @@ class MainWindow(QMainWindow):
             themes.apply(app, theme)
         self.settings_button.setIcon(settings_icon(theme.muted))
         self.detail.focus_button.setIcon(expand_icon(theme.muted))
+        self.focus.rename_button.setIcon(pencil_icon(theme.muted))
+        for step, button in self.focus.step_buttons.items():
+            button.setIcon(chevron_icon(theme.muted, up=step < 0))
         self.redraw()
 
     def _sync_autostart(self) -> None:
