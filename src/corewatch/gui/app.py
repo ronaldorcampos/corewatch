@@ -253,8 +253,6 @@ class MainWindow(QMainWindow):
         self.start_minimized = bool(settings.value("start_minimized", False, type=bool))
         self.show_min_max = bool(settings.value("show_min_max", True, type=bool))
         self.show_host = bool(settings.value("show_host", True, type=bool))
-        collapsed = settings.value("collapsed", [], type=list)
-        self.collapsed: set[str] = {str(d) for d in collapsed} if isinstance(collapsed, list) else set()
         # Cards showing their full list as well as their compact view ("All sensors").
         self.expanded: set[str] = set(self._load_list("expanded_cards"))
         self.selected_key: str | None = str(settings.value("selected", "")) or None
@@ -347,7 +345,6 @@ class MainWindow(QMainWindow):
         self.filter.setMinimumWidth(240)
         self.filter.textChanged.connect(lambda _: self._apply_filter())
         self.filter.textChanged.connect(lambda _: self.close_focus())  # a search is for every sensor
-        self._filter_folds: dict[str, bool] = {}
         toolbar.addWidget(self.filter)
         focus_filter = QAction(self)
         focus_filter.setShortcut("Ctrl+F")
@@ -514,10 +511,6 @@ class MainWindow(QMainWindow):
             "Also list inputs with nothing attached: empty fan headers and unconnected temperature probes"
         )
         self.unused_action.toggled.connect(self.set_show_unused)
-        self.expand_action = QAction("Expand all", self)
-        self.expand_action.triggered.connect(self._expand_all)
-        self.collapse_action = QAction("Collapse all", self)
-        self.collapse_action.triggered.connect(self._collapse_all)
         self.host_action = QAction("Show this computer's name", self)
         self.host_action.setCheckable(True)
         self.host_action.setChecked(self.show_host)
@@ -557,7 +550,7 @@ class MainWindow(QMainWindow):
         """The options shared by the settings menu and the tray menu, from theme down to Quit."""
         theme_menu = menu.addMenu("Theme")
         theme_menu.addActions(self.theme_actions.actions())
-        menu.addActions([self.unused_action, self.expand_action, self.collapse_action, self.host_action])
+        menu.addActions([self.unused_action, self.host_action])
         menu.addSeparator()
         menu.addActions([self.tray_action, self.autostart_action, self.minimized_action])
         menu.addSeparator()
@@ -749,20 +742,6 @@ class MainWindow(QMainWindow):
         self.close_to_tray = enabled
         self.settings.setValue("close_to_tray", enabled)
 
-    def _on_fold(self, device: str, collapsed: bool) -> None:
-        """A click on a card's chevron: remembered, unless it was made while filtering."""
-        if self.filter.text().strip():
-            self._filter_folds[device] = collapsed
-        else:
-            self._remember_collapse(device, collapsed)
-
-    def _remember_collapse(self, device: str, collapsed: bool) -> None:
-        if collapsed:
-            self.collapsed.add(device)
-        else:
-            self.collapsed.discard(device)
-        self.settings.setValue("collapsed", sorted(self.collapsed))
-
     def _remember_table(self, device: str, shown: bool) -> None:
         if shown:
             self.expanded.add(device)
@@ -770,16 +749,6 @@ class MainWindow(QMainWindow):
             self.expanded.discard(device)
         self.settings.setValue("expanded_cards", json.dumps(sorted(self.expanded)))
         self.redraw()  # the card's width needs changed
-
-    def _expand_all(self) -> None:
-        for device, section in self.sections.items():
-            section.set_collapsed(False)
-            self._remember_collapse(device, False)
-
-    def _collapse_all(self) -> None:
-        for device, section in self.sections.items():
-            section.set_collapsed(True)
-            self._remember_collapse(device, True)
 
     # ----- data ---------------------------------------------------------------------
 
@@ -858,12 +827,6 @@ class MainWindow(QMainWindow):
             )
             section.set_view_data(data, filtering)
             section.setVisible(bool(rows))
-            # While filtering, open every matching card without touching the remembered state.
-            if filtering:
-                # Cards open while filtering; a fold made during the search lasts until it ends.
-                section.set_collapsed(self._filter_folds.get(device, False))
-            else:
-                section.set_collapsed(device in self.collapsed)
             section.set_rows(rows, now, self.fahrenheit, self.gap)
             # Beside another card, it needs room for its compact view, or for its list when shown.
             need = themes.px(CardDeck.MIN_HALF)
@@ -887,10 +850,7 @@ class MainWindow(QMainWindow):
         for device in devices:
             section = self.sections.get(device)
             if section is None:
-                section = CategorySection(
-                    device, device in self.collapsed, view=view_for(device), show_table=device in self.expanded
-                )
-                section.collapse_toggled.connect(self._on_fold)
+                section = CategorySection(device, view=view_for(device), show_table=device in self.expanded)
                 section.table_toggled.connect(self._remember_table)
                 section.grid.selected.connect(self._select)
                 section.grid.opened.connect(self.open_focus)
@@ -904,8 +864,6 @@ class MainWindow(QMainWindow):
         self._devices = devices
 
     def _apply_filter(self) -> None:
-        if not self.filter.text().strip():
-            self._filter_folds.clear()
         self.redraw()
 
     def _select(self, key: str) -> None:

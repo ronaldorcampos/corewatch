@@ -46,7 +46,7 @@ load and power reading your machine exposes, refreshes them at an interval you c
   full list. While you filter, every card lists just the sensors that match.
 - **The full list** groups a card's sensors under Temperatures, Load, Clocks, Power, Fan speed,
   Fan control, Voltages and Traffic, in two columns. Each row has a 60-second sparkline, the
-  current value, min, max and average. Click anywhere on a card's header to fold it.
+  current value, min, max and average.
 - **Detail panel** for the selected sensor: a 1, 5 or 15 minute chart with the hardware's limits
   drawn as dashed lines. Hover over the chart to read any point's value and time. Beside the chart:
   lowest and highest (with the time each happened), averages for the session, the last minute and

@@ -400,23 +400,20 @@ class SensorGrid(QWidget):
 
 
 class CategorySection(QFrame):
-    """A card for one device: a header that folds it, then its compact view (if it has one) and
-    its full sensor list, shown on demand under the view."""
+    """A card for one device: a header, then its compact view (if it has one) and its full
+    sensor list, shown on demand under the view."""
 
-    collapse_toggled = Signal(str, bool)
     table_toggled = Signal(str, bool)  # "All sensors" switched on or off by a click
 
     def __init__(
         self,
         device: str,
-        collapsed: bool,
         parent: QWidget | None = None,
         view: "CardView | None" = None,
         show_table: bool = False,
     ) -> None:
         super().__init__(parent)
         self.device = device
-        self.collapsed: bool = collapsed
         self.show_table = show_table
         self.filtering = False
         self.setObjectName("card")
@@ -424,19 +421,11 @@ class CategorySection(QFrame):
         layout.setContentsMargins(14, 10, 14, 10)
         layout.setSpacing(6)
 
-        # The whole header row folds the card, not just the chevron.
         self.header = QWidget()
         self.header.setObjectName("cardHeader")
-        self.header.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.header.setToolTip("Click to fold or unfold")
         header = QHBoxLayout(self.header)
         header.setContentsMargins(0, 0, 0, 0)
         header.setSpacing(8)
-        self.chevron = QToolButton()
-        self.chevron.setObjectName("chevron")
-        self.chevron.setAutoRaise(True)
-        self.chevron.clicked.connect(lambda: self.set_collapsed(not self.collapsed, user=True))
-        header.addWidget(self.chevron)
         self.title = ElidedLabel(device)
         self.title.setObjectName("sectionTitle")
         header.addWidget(self.title)
@@ -461,7 +450,7 @@ class CategorySection(QFrame):
         self.grid = SensorGrid()
         layout.addWidget(self.grid)
         layout.addStretch(1)  # beside a taller card, keep this one's content at the top
-        self.set_collapsed(collapsed)
+        self._sync()
 
     def paintEvent(self, event: QPaintEvent) -> None:
         painter = QPainter(self)
@@ -478,19 +467,11 @@ class CategorySection(QFrame):
 
     def _sync(self) -> None:
         if self.view is not None:
-            self.view.setVisible(not self.collapsed and self.has_view())
-        self.grid.setVisible(not self.collapsed and self.table_shown())
+            self.view.setVisible(self.has_view())
+        self.grid.setVisible(self.table_shown())
         self.table_button.setVisible(self.has_view())
         # As tall with the button as without it, so cards side by side line their titles up.
         self.header.setMinimumHeight(self.table_button.sizeHint().height())
-
-    def set_collapsed(self, collapsed: bool, user: bool = False) -> None:
-        """``user`` marks a click (remembered); filtering expands sections without remembering it."""
-        self.collapsed = collapsed
-        self._sync()
-        self.chevron.setArrowType(Qt.ArrowType.RightArrow if collapsed else Qt.ArrowType.DownArrow)
-        if user:
-            self.collapse_toggled.emit(self.device, collapsed)
 
     def set_show_table(self, shown: bool, user: bool = False) -> None:
         self.show_table = shown
@@ -513,10 +494,3 @@ class CategorySection(QFrame):
     def set_rows(self, rows: Sequence[Row], now: float, fahrenheit: bool, gap: float) -> None:
         self.count.setText(f"{len(rows)} sensor{'s' if len(rows) != 1 else ''}")
         self.grid.set_rows(rows, now, fahrenheit, gap)
-
-    def mouseReleaseEvent(self, event: QMouseEvent) -> None:
-        # Clicks on the header's labels and empty space land here; the chevron handles its own.
-        if event.button() == Qt.MouseButton.LeftButton and self.header.geometry().contains(event.position().toPoint()):
-            self.set_collapsed(not self.collapsed, user=True)
-            return
-        super().mouseReleaseEvent(event)

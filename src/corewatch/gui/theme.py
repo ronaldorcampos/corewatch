@@ -293,7 +293,6 @@ def stylesheet(t: Theme) -> str:
     QSplitter::handle {{ background: transparent; }}
     #listArea, #listContainer {{ background: transparent; }}
     QLabel#sectionTitle {{ font-family: {display}; font-size: {px(17)}px; font-weight: 700; letter-spacing: 1px; }}
-    QToolButton#chevron {{ border: none; background: transparent; padding: 0; }}
     QStatusBar {{ background: transparent; color: {t.muted}; font-family: {mono}; font-size: {px(11)}px; }}
     QStatusBar::item {{ border: none; }}
     QLabel#muted {{ color: {t.muted}; font-size: {px(12)}px; }}

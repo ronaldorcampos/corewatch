@@ -127,18 +127,6 @@ def test_unit_toggle_filter_and_reset(qtbot, settings) -> None:  # type: ignore[
     assert texts(window, "pkg")[2] == "—"  # statistics start over at the next reading
 
 
-def test_filter_opens_collapsed_cards_without_forgetting_they_were_collapsed(qtbot, settings) -> None:  # type: ignore[no-untyped-def]
-    window = make_window(qtbot, settings, SCRIPT)
-    section = window.sections["GPU · RTX"]
-    section.chevron.click()
-    assert section.collapsed and settings.value("collapsed", type=list) == ["GPU · RTX"]
-    window.filter.setText("gpu")
-    assert not section.collapsed
-    window.filter.clear()
-    assert section.collapsed
-    assert settings.value("collapsed", type=list) == ["GPU · RTX"]
-
-
 def test_cards_use_two_columns_or_one_when_narrow(qtbot, settings) -> None:  # type: ignore[no-untyped-def]
     window = make_window(qtbot, settings, SCRIPT)
     grid = window.sections["CPU · i7"].grid
@@ -564,18 +552,6 @@ def test_finish_closes_the_sources_after_a_clean_stop(qtbot, settings) -> None: 
     assert window.monitor.sources[0].closed
 
 
-def test_folding_a_card_while_filtering_lasts_until_the_filter_clears(qtbot, settings) -> None:  # type: ignore[no-untyped-def]
-    window = make_window(qtbot, settings, SCRIPT)
-    section = window.sections["GPU · RTX"]
-    window.filter.setText("gpu")
-    section.chevron.click()
-    window.refresh()
-    assert section.collapsed  # doesn't spring open on the next tick
-    assert settings.value("collapsed") is None  # and isn't remembered
-    window.filter.clear()
-    assert not section.collapsed
-
-
 def test_selection_moves_off_a_sensor_that_becomes_hidden(qtbot, settings) -> None:  # type: ignore[no-untyped-def]
     from corewatch.model import Reading
 
@@ -655,21 +631,6 @@ def test_pinned_sensors_get_their_own_tray_icons(qtbot, settings) -> None:  # ty
 def test_pin_is_disabled_without_a_system_tray(qtbot, settings) -> None:  # type: ignore[no-untyped-def]
     window = make_window(qtbot, settings, SCRIPT)
     assert not window.sensor_menu("pkg").actions()[0].isEnabled()
-
-
-def test_clicking_anywhere_on_a_card_header_folds_it(qtbot, settings) -> None:  # type: ignore[no-untyped-def]
-    window = make_window(qtbot, settings, SCRIPT)
-    window.resize(1200, 900)
-    window.show()
-    section = window.sections["GPU · RTX"]
-    title = section.title
-    qtbot.mouseClick(title, Qt.MouseButton.LeftButton)
-    assert section.collapsed and settings.value("collapsed", type=list) == ["GPU · RTX"]
-    empty_space = QPoint(section.header.width() // 2, section.header.height() // 2)
-    qtbot.mouseClick(section.header, Qt.MouseButton.LeftButton, pos=empty_space)
-    assert not section.collapsed
-    section.chevron.click()  # the chevron still works, and only toggles once
-    assert section.collapsed
 
 
 def test_short_tray_numbers() -> None:
@@ -989,8 +950,6 @@ def test_corewatchs_tray_menu_has_the_apps_options(qtbot, settings, monkeypatch)
         "---",
         "Theme",
         "Show unused sensors",
-        "Expand all",
-        "Collapse all",
         "Show this computer's name",
         "---",
         "Keep running in the tray when closed",
@@ -1202,7 +1161,7 @@ def test_cards_paint_accent_corner_marks(qtbot, palette, monkeypatch) -> None:  
     from corewatch.gui.sensors import CategorySection
 
     monkeypatch.setattr("corewatch.gui.sensors.current_theme", lambda: palette)
-    section = CategorySection("CPU · i7", collapsed=True)
+    section = CategorySection("CPU · i7")
     qtbot.addWidget(section)
     section.resize(300, 120)
     image = section.grab().toImage()
@@ -1546,7 +1505,7 @@ def test_overview_shows_gauges_and_a_heat_map_in_the_cpu_card(qtbot, settings) -
     window.grab()  # paints gauges and tiles, including the selected one
 
 
-def test_overview_steps_aside_while_filtering_and_when_folded(qtbot, settings) -> None:  # type: ignore[no-untyped-def]
+def test_overview_steps_aside_while_filtering(qtbot, settings) -> None:  # type: ignore[no-untyped-def]
     window = make_window(qtbot, settings, [machine()])
     window.show()
     window.refresh()
@@ -1555,10 +1514,6 @@ def test_overview_steps_aside_while_filtering_and_when_folded(qtbot, settings) -
     assert not window.gauges.isVisible() and not heat_map.isVisible()
     window.filter.setText("")
     assert window.gauges.isVisible() and heat_map.isVisible()
-    window.sections[CPU].set_collapsed(True, user=True)
-    assert not heat_map.isVisible()
-    window.sections[CPU].set_collapsed(False, user=True)
-    assert heat_map.isVisible()
 
 
 def test_heat_map_needs_two_cores_and_ignores_renames(qtbot, settings) -> None:  # type: ignore[no-untyped-def]
@@ -2321,7 +2276,7 @@ def test_cards_are_never_paired_narrower_than_they_can_go(qtbot, settings) -> No
         Reading("rx", "Network · enp7s0", "Download", Kind.THROUGHPUT, 0.0),
     ]
     window = make_window(qtbot, settings, [readings])
-    window.resize(1300, 900)
+    window.resize(1100, 900)
     window.show()
     window.refresh()
     QApplication.processEvents()
@@ -2727,3 +2682,12 @@ def test_a_cut_title_shows_its_whole_name_until_the_text_changes(qtbot) -> None:
     assert label.toolTip() == "Motherboard · ROG STRIX Z790-A GAMING WIFI"
     label.setText("Short")
     assert label.toolTip() == ""
+
+
+def test_a_card_header_click_hides_nothing(qtbot, settings) -> None:  # type: ignore[no-untyped-def]
+    window = _open_window(qtbot, settings)
+    fans, gpu = window.sections["Fans"], window.sections[GPU]
+    for section in (fans, gpu):
+        qtbot.mouseClick(section, Qt.MouseButton.LeftButton, pos=section.header.geometry().center())
+    assert fans.view.isVisible() and gpu.grid.isVisible()  # no folding: "All sensors" is the one toggle
+    assert "Expand all" not in [a.text() for a in window.settings_button.menu().actions()]
