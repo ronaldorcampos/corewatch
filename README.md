@@ -58,9 +58,9 @@ load and power reading your machine exposes, refreshes them at an interval you c
 - **Focus view.** Double-click any sensor (in a card, a gauge or the heat map), or use the focus
   button in the detail drawer, to see it across the whole window:
   - a dial with the reading against its scale, its high limit marked and its critical zone
-    shaded. A power reading fills against its limit, and an NVIDIA card's clocks against their top
-    speed. Sensors with no natural scale (voltages, CPU clocks, fan RPM, traffic) show the number
-    alone;
+    shaded. A power reading fills against its limit, and a clock against its top speed (each CPU
+    core's own, and an NVIDIA card's). Sensors with no natural scale (voltages, fan RPM, traffic)
+    show the number alone;
   - the headroom to its limit, and which way it's heading;
   - a large chart that always keeps the limits in view, with its peak and a 1-minute average;
   - every statistic, each with a word on what it means.
@@ -110,7 +110,7 @@ load and power reading your machine exposes, refreshes them at an interval you c
 | Kernel hwmon (`/sys/class/hwmon`) | Intel CPU package and per-core temperatures (`coretemp`), motherboard temperatures, fans, fan control, voltages, NVMe and network card temperatures, and anything else a driver publishes |
 | AMD CPUs (`k10temp`, optional `zenpower`) | CPU temperature (the real die temperature, plus the fan-control value where the chip reports both) and one temperature per chiplet (CCD); AMD reports no per-core temperatures. With `zenpower` (Zen 1-3), core and SoC voltages, currents and power |
 | AMD GPUs (`amdgpu`) | GPU, hotspot and memory temperatures (warning at the throttle point, critical at shutdown), fan speed (RPM and %), core voltage, graphics and memory clocks, power draw against its cap, load and video memory, under the card's model name |
-| `/proc/stat`, cpufreq | Load and clock speed per physical core |
+| `/proc/stat`, cpufreq | Load and clock speed per physical core, with each core's top clock from the hardware |
 | RAPL (`/sys/class/powercap`) | CPU package and core power draw on Intel and AMD Zen, and Intel integrated graphics power (needs one permission tweak, see below). The package's power limit (the higher of its sustained and boost limits, as the firmware or a power profile sets them) is shown for reference, not as a warning |
 | Intel graphics (`i915`, `xe`) | Graphics clock and active time (the share of time it isn't asleep) for integrated graphics and Arc cards. **Integrated:** power draw from RAPL; it has no temperature sensor of its own, so its heat shows in the CPU package temperature, and if it's switched off in the BIOS only its power draw appears, under the CPU. **Arc:** power draw against its limit and core voltage, plus fan speeds and GPU and memory temperatures where the kernel reports them (fans from about Linux 6.12, temperatures on Battlemage with `xe`). corewatch never keeps an idle Intel GPU awake: while nothing is using it, it shows 0 MHz and 0 % without reading it, and an Arc card's sensors stay blank until it's in use |
 | NVIDIA NVML | GPU temperature, fan speeds (RPM and %), power draw (the power limit is shown for reference, not as a warning), graphics and memory clocks (with the card's top clock for each), load, video memory |

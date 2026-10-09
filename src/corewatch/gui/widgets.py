@@ -361,6 +361,7 @@ class HistoryChart(QWidget):
             zone.setAlpha(14)
             painter.fillRect(QRectF(plot.topLeft(), QPointF(plot.right(), to_xy(start, reading.crit).y())), zone)
         named = font(DISPLAY_FONT, 9, QFont.Weight.DemiBold, 1.5)
+        taken: list[QRectF] = []  # where the limits' names went, for the peak's label to keep clear of
         for limit, color, name in (
             (reading.high, theme.warning, "high"),
             (reading.crit, theme.critical, "critical"),
@@ -380,6 +381,8 @@ class HistoryChart(QWidget):
                     if box.top() < plot.top():  # no room above the line: write it under
                         box.moveTop(y + 2)
                     painter.drawText(box, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter, label)
+                    used = QFontMetrics(named).horizontalAdvance(label)
+                    taken.append(QRectF(box.right() - used, box.top(), used, box.height()))
                     painter.setFont(small)
 
         # The series itself, with a soft fill underneath.
@@ -438,6 +441,8 @@ class HistoryChart(QWidget):
             width = metrics.horizontalAdvance(label) + 8
             box = QRectF(center.x() - width / 2, center.y() + (-(text_height + 6) if above else 6), width, text_height)
             box.moveLeft(min(max(box.left(), plot.left()), plot.right() - box.width()))
+            if above and any(box.intersects(name) for name in taken):  # a peak at a limit: under its dot
+                box.moveTop(center.y() + 6)
             if lowest is not highest or above:
                 painter.drawText(box, Qt.AlignmentFlag.AlignHCenter, label)
 

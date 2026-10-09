@@ -83,6 +83,10 @@ class CpuSource:
             known_clocks = [c for c in clocks if c is not None]
             if not known_clocks:
                 continue
+            # The core's top speed from the hardware (a favoured core's is higher than the rest,
+            # an E-core's lower), not scaling_max_freq, which is only where a policy caps it now.
+            tops = [read_int(self.sys_cpu / f"cpu{t}" / "cpufreq" / "cpuinfo_max_freq") for t in core.threads]
+            known_tops = [top for top in tops if top]
             readings.append(
                 Reading(
                     key=f"cpu/clock/{core.package}/{core.core_id}",
@@ -90,6 +94,7 @@ class CpuSource:
                     label=f"{core.name} clock",
                     kind=Kind.CLOCK,
                     value=max(known_clocks) / 1000,
+                    cap=max(known_tops) / 1000 if known_tops else None,
                 )
             )
         return readings

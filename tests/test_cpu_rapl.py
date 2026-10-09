@@ -2,6 +2,7 @@ from pathlib import Path
 
 from conftest import write_tree
 
+from corewatch.model import Kind
 from corewatch.sources.base import cpu_model_name
 from corewatch.sources.cpu import CpuSource, Ticks, load_percent, parse_proc_stat
 from corewatch.sources.rapl import RaplSource
@@ -48,6 +49,7 @@ def test_cpu_source_groups_threads_into_cores(tmp_path: Path, proc_root: Path) -
             "cpu1/topology/physical_package_id": "0",
             "cpu1/topology/core_id": "0",
             "cpu1/cpufreq/scaling_cur_freq": "5300000",
+            "cpu1/cpufreq/cpuinfo_max_freq": "5400000",  # cpu0 has none: the core's is what's known
             "cpu2/online": "0",  # offline: no topology, must be ignored
             "online": "0-1",
         },
@@ -61,6 +63,9 @@ def test_cpu_source_groups_threads_into_cores(tmp_path: Path, proc_root: Path) -
         "Core 0 load": 50.0,  # average of its two threads (90 % and 10 %)
         "Core 0 clock": 5300.0,  # fastest thread
     }
+    assert {r.label: r.cap for r in source.sample() if r.kind is Kind.CLOCK} == {"Core 0 clock": 5400.0}
+    (sys_cpu / "cpu1/cpufreq/cpuinfo_max_freq").unlink()
+    assert {r.label: r.cap for r in source.sample() if r.kind is Kind.CLOCK} == {"Core 0 clock": None}
 
 
 def test_cpu_source_multi_package_labels(tmp_path: Path, proc_root: Path) -> None:
