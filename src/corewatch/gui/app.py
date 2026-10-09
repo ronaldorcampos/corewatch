@@ -16,6 +16,7 @@ from PySide6.QtCore import (
     QByteArray,
     QObject,
     QPoint,
+    QRect,
     QRectF,
     QSettings,
     QSignalBlocker,
@@ -30,6 +31,7 @@ from PySide6.QtGui import (
     QActionGroup,
     QCloseEvent,
     QColor,
+    QCursor,
     QFontDatabase,
     QGuiApplication,
     QIcon,
@@ -69,7 +71,7 @@ from corewatch.gui import theme as themes
 from corewatch.gui.cards import CardDeck, ViewData, card_rank, is_wide, view_for
 from corewatch.gui.focus import FocusView
 from corewatch.gui.overview import GaugeStrip, gauge_specs
-from corewatch.gui.sensors import CategorySection
+from corewatch.gui.sensors import CategorySection, SensorGrid
 from corewatch.gui.widgets import DetailPanel, expand_icon
 from corewatch.model import Kind, Row, Status, format_short, format_value
 from corewatch.monitor import Collected, Monitor, gather_fans, gather_storage, group_rows, headline
@@ -419,7 +421,7 @@ class MainWindow(QMainWindow):
         page.setContentsMargins(0, 0, 4, 0)
         page.setSpacing(12)
         self.gauges = GaugeStrip()
-        self.gauges.selected.connect(self._select)
+        self.gauges.selected.connect(self._pick)
         self.gauges.opened.connect(self.open_focus)
         page.addWidget(self.gauges)
         self.deck = CardDeck()
@@ -435,6 +437,11 @@ class MainWindow(QMainWindow):
             self.detail.set_window(self.detail.nearest_window(float(str(stored_window))))
         self.detail.window_changed.connect(lambda seconds: self.settings.setValue("detail_window", seconds))
         self.detail.focus_requested.connect(self._focus_selected)
+        self.detail.expanded_changed.connect(self._set_drawer)
+        stored_height = self.settings.value("drawer_height", 360)
+        self._drawer_height = 360
+        with contextlib.suppress(ValueError, TypeError, OverflowError):
+            self._drawer_height = max(120, int(float(str(stored_height))))
 
         self.splitter = QSplitter(Qt.Orientation.Vertical)
         self.splitter.addWidget(self.list_area)
@@ -442,26 +449,38 @@ class MainWindow(QMainWindow):
         self.splitter.setChildrenCollapsible(False)
         self.splitter.setHandleWidth(10)
         self.splitter.setSizes([520, 360])
+        self.splitter.splitterMoved.connect(self._remember_drawer_height)
+        # A click on a sensor opens (or shuts) the drawer only once it can't be the start of a
+        # double-click: opened at once, the drawer could land on the sensor and take the second
+        # click, so the focus view would never open.
+        self._drawer_timer = QTimer(self)
+        self._drawer_timer.setSingleShot(True)
+        self._drawer_timer.setInterval(QApplication.doubleClickInterval())
+        self._drawer_timer.timeout.connect(self._settle_pick)
+        self._pending_drawer = False
+        self._pick_spot: QRect | None = None
+        self._drawer_open = False  # the strip and its arrow change the panel before they say so
 
         # One sensor across the whole window, in place of the overview until you go back.
         self.focus = FocusView()
         self.focus.back.connect(self.close_focus)
         self.focus.selected.connect(self.open_focus)  # a core in its strip
+        self.focus.stepped.connect(self._step_focus)
         self.focus.window_changed.connect(self.detail.set_window)  # one window setting for both
         self.focus.rename_requested.connect(self._rename_interactively)
         self.focus.pin_toggled.connect(lambda pinned: self.set_pinned(self.focus_key, pinned))
-        # Esc goes back wherever the keyboard is in the window, but only while the focus view is
-        # open: the rest of the time Esc is left to whatever has the keyboard.
+        # Esc goes back from the focus view, or shuts the detail drawer, wherever the keyboard is in
+        # the window; the rest of the time Esc is left to whatever has the keyboard.
         self.close_focus_shortcut = QShortcut(QKeySequence(Qt.Key.Key_Escape), self)
         self.close_focus_shortcut.setContext(Qt.ShortcutContext.WindowShortcut)
-        self.close_focus_shortcut.setEnabled(False)
-        self.close_focus_shortcut.activated.connect(self.close_focus)
+        self.close_focus_shortcut.activated.connect(self._escape)
 
         self.pages = QStackedWidget()
         self.pages.addWidget(self.splitter)
         self.pages.addWidget(self.focus)
         layout.addWidget(self.pages, 1)
         self.setCentralWidget(central)
+        self._set_drawer(False)  # the drawer starts shut: the cards get the window
 
     def _make_option_actions(self) -> None:
         """The app's options as actions, shared by the settings menu and the tray menu so both
@@ -724,6 +743,8 @@ class MainWindow(QMainWindow):
         rest = self.toolbar.sizeHint().width()  # what the toolbar needs without either
         rest -= chip if self.live_chip_action.isVisible() else 0
         rest -= brand if self.brand_action.isVisible() else 0
+        # Keep the window at least wide enough for what is left.
+        self.toolbar.setMinimumWidth(rest)
         room = self.toolbar.width()
         # Work it out rather than showing both and measuring, which relayouts the toolbar twice
         # on every resize of a narrow window; a toolbar that still overflows sheds more below.
@@ -852,10 +873,10 @@ class MainWindow(QMainWindow):
             if section is None:
                 section = CategorySection(device, view=view_for(device), show_table=device in self.expanded)
                 section.table_toggled.connect(self._remember_table)
-                section.grid.selected.connect(self._select)
+                section.grid.selected.connect(self._pick)
                 section.grid.opened.connect(self.open_focus)
                 if section.view is not None:
-                    section.view.selected.connect(self._select)
+                    section.view.selected.connect(self._pick)
                     section.view.opened.connect(self.open_focus)
                 section.grid.context_requested.connect(self._show_sensor_menu)
                 section.grid.set_show_min_max(self.show_min_max)
@@ -888,11 +909,70 @@ class MainWindow(QMainWindow):
         if key not in self.rows:
             return
         self.focus_key = key
-        self.close_focus_shortcut.setEnabled(True)
+        self._drawer_timer.stop()  # a double-click: the click it started with leaves the drawer be
         self._select(key)
+        self._sync_escape()
         if self.pages.currentWidget() is not self.focus:
             self.pages.setCurrentWidget(self.focus)
             self.focus.back_button.setFocus(Qt.FocusReason.OtherFocusReason)  # so Esc goes back
+
+    def _pick(self, key: str) -> None:
+        """A click on a sensor in the overview: select it, then, once the click can't be the start
+        of a double-click, open the drawer to its chart, or, on the sensor the open drawer shows,
+        shut it. A double-click opens the focus view instead and leaves the drawer as it is."""
+        if self.focus_key is not None:  # the release ending a double-click, after the focus view opened
+            return
+        self._pending_drawer = not (key == self.selected_key and self.detail.expanded)
+        self._pick_spot = self._spot(key)
+        self._select(key)
+        self._drawer_timer.start()
+
+    def _settle_pick(self) -> None:
+        self._set_drawer(self._pending_drawer)
+        spot = self._pick_spot
+        if self._pending_drawer and spot is not None:  # keep what was clicked clear of the drawer
+            self.list_area.ensureVisible(spot.center().x(), spot.center().y(), 0, spot.height() // 2 + 16)
+
+    def _spot(self, key: str) -> QRect | None:
+        """Where the clicked sensor is, in the scrolled cards' coordinates."""
+        source = self.sender()
+        content = self.list_area.widget()
+        if not isinstance(source, QWidget) or content is None or not content.isAncestorOf(source):
+            return None
+        if isinstance(source, SensorGrid):
+            rect = next((cell.rect for cell in source.cells() if cell.key == key), source.rect())
+        else:  # a gauge, a core or a tile: around the pointer, or the whole view from the keyboard
+            point = source.mapFromGlobal(QCursor.pos())
+            rect = QRect(point.x() - 1, point.y() - 20, 2, 40) if source.rect().contains(point) else source.rect()
+        return QRect(source.mapTo(content, rect.topLeft()), rect.size())
+
+    def _set_drawer(self, expanded: bool) -> None:
+        """Open the detail drawer to its chart, at the height it was last left at, or shut it to its
+        one-line strip so the cards get the window. Already open, it stays the height it is."""
+        self._drawer_timer.stop()  # shut (or opened) since a click: that click has had its say
+        opening = expanded and not self._drawer_open
+        self._drawer_open = expanded
+        if self.detail.expanded != expanded:
+            self.detail.set_expanded(expanded)
+        if opening:
+            total = sum(self.splitter.sizes()) or self.splitter.height()
+            height = max(min(self._drawer_height, total - 200), self.detail.minimumSizeHint().height())
+            self.splitter.setSizes([max(total - height, 0), height])
+        self._sync_escape()
+
+    def _remember_drawer_height(self, position: int, index: int) -> None:
+        if self.detail.expanded:
+            self._drawer_height = self.splitter.sizes()[1]
+            self.settings.setValue("drawer_height", self._drawer_height)
+
+    def _sync_escape(self) -> None:
+        self.close_focus_shortcut.setEnabled(self.focus_key is not None or self.detail.expanded)
+
+    def _escape(self) -> None:
+        if self.focus_key is not None:
+            self.close_focus()
+        elif self.detail.expanded:
+            self._set_drawer(False)
 
     def _focus_selected(self) -> None:
         if self.selected_key is not None:
@@ -902,7 +982,7 @@ class MainWindow(QMainWindow):
         if self.focus_key is None:
             return
         self.focus_key = None
-        self.close_focus_shortcut.setEnabled(False)
+        self._sync_escape()
         self.pages.setCurrentWidget(self.splitter)
 
     def _show_focus(self) -> None:
@@ -930,6 +1010,34 @@ class MainWindow(QMainWindow):
             self.focus_key in self.pinned,
             self._tray_factory is not None,
         )
+
+        previous, following = self._neighbours()
+        self.focus.set_neighbours(*(self._step_name(r) if r is not None else None for r in (previous, following)))
+
+    def _step_order(self) -> list[Row]:
+        """Every sensor in the overview's order: card by card, each card's in its list's order
+        (only what the filter matches, while there's one)."""
+        return [row for device in self._devices for _, rows in self.sections[device].grid.blocks() for row in rows]
+
+    def _neighbours(self) -> tuple[Row | None, Row | None]:
+        """The focus view's previous and next sensor; the last one steps round to the first. From a
+        sensor the filter doesn't match, the steps go to its last and first match."""
+        order = self._step_order()
+        keys = [r.reading.key for r in order]
+        if self.focus_key not in keys:
+            return (order[-1], order[0]) if order else (None, None)
+        if len(order) == 1:
+            return None, None
+        index = keys.index(self.focus_key)
+        return order[index - 1], order[(index + 1) % len(order)]
+
+    def _step_name(self, row: Row) -> str:
+        return f"{row.reading.label} on {row.reading.origin or row.reading.device}"  # the list's own names
+
+    def _step_focus(self, step: int) -> None:
+        row = self._neighbours()[0 if step < 0 else 1]
+        if row is not None:
+            self.open_focus(row.reading.key)
 
     def _now(self) -> float:
         return self.monitor.last_sample_at or self.monitor.clock()
@@ -1091,6 +1199,7 @@ class MainWindow(QMainWindow):
         return menu
 
     def _show_sensor_menu(self, key: str, position: QPoint) -> None:
+        self._select(key)  # but leave the drawer as it is
         menu = self.sensor_menu(key)
         self._popup(menu, position)
         menu.deleteLater()  # one is built per right-click; don't keep them all

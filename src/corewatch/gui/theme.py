@@ -286,6 +286,7 @@ def stylesheet(t: Theme) -> str:
         font-family: {mono}; font-size: {px(12)}px; letter-spacing: 0; min-width: 22px; padding: 6px 10px;
     }}
     QToolButton#settings {{ padding: 6px; }}
+    QToolButton#drawerToggle {{ padding: 6px 8px; }}
     QToolButton::menu-indicator {{ image: none; width: 0; }}
     #notes {{
         background: {t.warning_soft}; color: {t.warning}; border: 1px solid {t.warning}; padding: 8px 12px;

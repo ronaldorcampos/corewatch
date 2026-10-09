@@ -7,7 +7,18 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 
 from PySide6.QtCore import QPointF, QRectF, QSize, Qt, Signal
-from PySide6.QtGui import QColor, QFont, QFontMetrics, QPainter, QPainterPath, QPaintEvent, QPen, QResizeEvent
+from PySide6.QtGui import (
+    QColor,
+    QFont,
+    QFontMetrics,
+    QKeySequence,
+    QPainter,
+    QPainterPath,
+    QPaintEvent,
+    QPen,
+    QResizeEvent,
+    QShortcut,
+)
 from PySide6.QtWidgets import (
     QBoxLayout,
     QButtonGroup,
@@ -539,10 +550,12 @@ def _window_text(seconds: float) -> str:
 
 class FocusView(QWidget):
     """One sensor across the whole window. ``back`` returns to the overview; a click on a core in
-    the strip focuses on that core instead (``selected``)."""
+    the strip focuses on that core instead (``selected``); ``stepped`` asks for the sensor before
+    (-1) or after (1) this one."""
 
     back = Signal()
     selected = Signal(str)
+    stepped = Signal(int)
     window_changed = Signal(float)
     rename_requested = Signal(str)
     pin_toggled = Signal(bool)
@@ -559,16 +572,35 @@ class FocusView(QWidget):
 
         header = QHBoxLayout()
         header.setSpacing(12)
-        self.back_button = QPushButton("←  Overview")
+        self.back_button = QPushButton("←  Back")
         self.back_button.setObjectName("back")
         self.back_button.setToolTip("Back to every sensor (Esc)")
         self.back_button.clicked.connect(self.back)
         header.addWidget(self.back_button)
+        # Through every sensor in the overview's order without going back to it. Ctrl+PgUp/PgDn
+        # rather than the arrows, which the core strip and the window buttons use, or PgUp/PgDn,
+        # which scroll the page.
+        self.step_buttons: dict[int, QPushButton] = {}
+        steps = QHBoxLayout()
+        steps.setSpacing(4)
+        for step, text, keys in ((-1, "‹", "Ctrl+PgUp"), (1, "›", "Ctrl+PgDown")):  # noqa: RUF001
+            button = QPushButton(text)
+            button.setObjectName("iconButton")
+            button.clicked.connect(lambda _=False, step=step: self.stepped.emit(step))
+            steps.addWidget(button)
+            self.step_buttons[step] = button
+            # A window shortcut, so it works wherever the keyboard is; it's off while this page
+            # is hidden.
+            shortcut = QShortcut(QKeySequence(keys), self)
+            shortcut.setContext(Qt.ShortcutContext.WindowShortcut)
+            shortcut.activated.connect(lambda step=step: self.stepped.emit(step))
+        header.addLayout(steps)
+        self.set_neighbours(None, None)
         titles = QVBoxLayout()
         titles.setSpacing(0)
-        self.device = ElidedLabel("")
+        self.device = ElidedLabel("", shortest=60)  # both cut short first: no other part of the header can
         self.device.setObjectName("focusDevice")
-        self.title = ElidedLabel("")
+        self.title = ElidedLabel("", shortest=60)
         self.title.setObjectName("focusTitle")
         titles.addWidget(self.device)
         titles.addWidget(self.title)
@@ -684,6 +716,14 @@ class FocusView(QWidget):
         direction = QBoxLayout.Direction.LeftToRight if wide else QBoxLayout.Direction.TopToBottom
         if self.top.direction() != direction:
             self.top.setDirection(direction)
+
+    def set_neighbours(self, previous: str | None, following: str | None) -> None:
+        """Name the sensors a step either way; None turns that step off."""
+        for step, name, word, keys in ((-1, previous, "Previous", "Ctrl+PgUp"), (1, following, "Next", "Ctrl+PgDn")):
+            button = self.step_buttons[step]
+            button.setEnabled(name is not None)
+            button.setAccessibleName(f"{word} sensor")
+            button.setToolTip(f"{word}: {name}  ({keys})" if name is not None else f"{word} sensor")
 
     def show_row(
         self,

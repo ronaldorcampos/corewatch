@@ -25,8 +25,8 @@ from PySide6.QtGui import (
 from PySide6.QtWidgets import QBoxLayout, QGridLayout, QScrollArea, QSizePolicy, QToolTip, QWidget
 
 from corewatch.gui.overview import CoreHeatMap, core_groups, tile_name
-from corewatch.gui.sensors import draw_sparkline
 from corewatch.gui.theme import BODY_FONT, DISPLAY_FONT, MONO_FONT, Theme, current_theme, font, px
+from corewatch.gui.widgets import draw_sparkline
 from corewatch.model import Kind, Reading, Row, Status, format_value
 from corewatch.monitor import FANS, STORAGE, drive_name
 

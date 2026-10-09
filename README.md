@@ -9,7 +9,7 @@ load and power reading your machine exposes, refreshes them at an interval you c
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/screenshot.png">
   <source media="(prefers-color-scheme: light)" srcset="docs/screenshot-light.png">
-  <img alt="corewatch showing CPU core temperatures with sparklines and a detail chart" src="docs/screenshot.png">
+  <img alt="corewatch showing its gauges, a CPU core heat map and device cards, with the detail drawer shut" src="docs/screenshot.png">
 </picture>
 
 ## Features
@@ -19,7 +19,7 @@ load and power reading your machine exposes, refreshes them at an interval you c
   CPU load (with the busiest core and the fastest core's clock) and CPU + GPU power (the ring split
   between the two). With a graphics card next to integrated graphics, the gauges follow the card;
   integrated graphics' power is never added to the CPU's, since the CPU's figure already includes
-  it. Click a gauge (or Tab to it and press Enter) to open that sensor in the detail panel. A gauge
+  it. Click a gauge (or Tab to it and press Enter) to open that sensor in the detail drawer. A gauge
   only appears if your hardware reports its sensor.
 - **Core heat map.** The CPU card shows its cores as a honeycomb, each tinted by temperature
   (under 40 °C, 40–50, 50–70, 70 and up), so a hot core stands out at a glance. Intel hybrid
@@ -28,7 +28,7 @@ load and power reading your machine exposes, refreshes them at an interval you c
   chiplet (or an APU) has no map. Click a core, or use the arrow keys and Enter, to see its history.
 - **One card per device** (CPU, GPU, motherboard, network card), plus a **Fans** card that
   gathers every fan from the motherboard and the GPU, and a **Storage** card with every drive (the
-  detail panel still names the device each sensor belongs to). The CPU and GPU cards span the
+  detail drawer still names the device each sensor belongs to). The CPU and GPU cards span the
   window; the rest sit two to a line when the window is wide enough.
 - **Each card opens on a view made for its device:**
   - **CPU:** the heat map, with tiles for package and cores power, the fastest clock, load, the
@@ -47,12 +47,15 @@ load and power reading your machine exposes, refreshes them at an interval you c
 - **The full list** groups a card's sensors under Temperatures, Load, Clocks, Power, Fan speed,
   Fan control, Voltages and Traffic, in two columns. Each row has a 60-second sparkline, the
   current value, min, max and average.
-- **Detail panel** for the selected sensor: a 1, 5 or 15 minute chart with the hardware's limits
-  drawn as dashed lines. Hover over the chart to read any point's value and time. Beside the chart:
-  lowest and highest (with the time each happened), averages for the session, the last minute and
-  the last 5 minutes, variation, trend, and time spent past a limit or at critical.
+- **Detail drawer** along the bottom for the selected sensor. Shut, it's one line: the sensor, its
+  value and its last minute, so the cards get the window. Click a sensor, or that line, to open it
+  to a 1, 5 or 15 minute chart with the hardware's limits drawn as dashed lines. Hover over the
+  chart to read any point's value and time. Below the chart: lowest and highest (with the time each
+  happened), averages for the session, the last minute and the last 5 minutes, variation, trend,
+  and time spent past a limit or at critical. Drag its edge to resize it; it reopens at that
+  height. Esc, its arrow, or clicking the shown sensor again shuts it.
 - **Focus view.** Double-click any sensor (in a card, a gauge or the heat map), or use the focus
-  button in the detail panel, to see it across the whole window:
+  button in the detail drawer, to see it across the whole window:
   - a dial with the reading against its scale, its high limit marked and its critical zone
     shaded. Sensors with no natural scale (voltages, clocks, fan RPM, traffic) show the number
     alone;
@@ -62,7 +65,9 @@ load and power reading your machine exposes, refreshes them at an interval you c
 
   For a CPU sensor, **Every core** charts each core's temperature over the same minutes on one
   scale, with its peak and clock; click a core to focus on it. Rename and Pin to tray work from
-  here too. Esc or **Overview** goes back, and so does typing in the filter.
+  here too. **‹ ›** (or Ctrl+PgUp and Ctrl+PgDn) step to the previous or next sensor in the
+  overview's order, without going back. Esc or **Back** goes back, and so does typing in the
+  filter.
 - **Readable names.** Intel hybrid CPUs show P-core 0-7 and E-core 0-7 instead of the kernel's
   gappy core IDs. Nuvoton motherboard chips get named voltage rails (Vcore, +12V, +5V, +3.3V, ...).
   Right-click any sensor and choose **Rename…** to give it your own name (handy for "Fan 2" →
@@ -73,7 +78,7 @@ load and power reading your machine exposes, refreshes them at an interval you c
   Double-click it (or, on desktops where a click doesn't open the menu, click it) to bring the
   window up.
 - **Pin sensors to the tray.** Right-click a sensor and choose **Pin to tray**, or use the button
-  in the detail panel. Each pinned sensor gets its own tray icon showing its number, like Core
+  in the detail drawer. Each pinned sensor gets its own tray icon showing its number, like Core
   Temp's per-core icons. Right-click one to see its group, name, min, max and average, or to
   unpin it (which also works for a sensor that has stopped reporting; its icon shows "?"). On desktops
   whose tray shows tooltips (KDE, Xfce, Cinnamon) hovering shows the same; Ubuntu's doesn't.

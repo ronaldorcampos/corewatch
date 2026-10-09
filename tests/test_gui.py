@@ -720,7 +720,12 @@ def test_right_click_opens_the_sensor_menu_and_frees_it(qtbot, settings) -> None
     QApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
     assert shown[0][0] == "Pin to tray" and "Rename…" in shown[0]
     assert window.selected_key == "gpu"  # right-click also selects
+    assert not window.detail.expanded  # but doesn't open the drawer
     assert len(window.findChildren(QMenu)) == before
+    window._pick("gpu")
+    _settle(window)
+    QApplication.sendEvent(grid, QContextMenuEvent(QContextMenuEvent.Reason.Mouse, point, grid.mapToGlobal(point)))
+    assert window.detail.expanded  # nor shut it
 
 
 def test_detail_pin_button_is_disabled_without_a_tray(qtbot, settings) -> None:  # type: ignore[no-untyped-def]
@@ -2489,6 +2494,13 @@ def _open_window(qtbot, settings, script=None):  # type: ignore[no-untyped-def]
     return window
 
 
+def _settle(window) -> None:  # type: ignore[no-untyped-def]
+    """Let a click on a sensor reach the drawer now, rather than a double-click's wait later."""
+    if window._drawer_timer.isActive():
+        window._drawer_timer.stop()
+        window._settle_pick()
+
+
 def test_focus_view_opens_from_the_detail_panel_and_esc_goes_back(qtbot, settings) -> None:  # type: ignore[no-untyped-def]
     window = _open_window(qtbot, settings)
     focus = window.focus
@@ -2605,6 +2617,7 @@ def test_focus_view_fits_the_narrowest_window(qtbot, settings) -> None:  # type:
     from PySide6.QtWidgets import QBoxLayout
 
     window = _open_window(qtbot, settings)
+    window._restyle()  # the widths come from the app's stylesheet
     window.open_focus("pkg")
     narrowest = window.minimumSizeHint().width()
     assert narrowest <= 720  # the focus view and its button don't widen the window
@@ -2618,6 +2631,15 @@ def test_focus_view_fits_the_narrowest_window(qtbot, settings) -> None:  # type:
     window.resize(1300, 900)
     qtbot.waitUntil(lambda: window.width() == 1300)
     assert focus.top.direction() == QBoxLayout.Direction.LeftToRight
+
+
+def test_the_open_drawer_fits_the_narrowest_window(qtbot, settings) -> None:  # type: ignore[no-untyped-def]
+    window = _open_window(qtbot, settings)
+    window._restyle()  # the widths come from the app's stylesheet
+    window._pick("pkg")
+    _settle(window)
+    QApplication.processEvents()
+    assert window.detail.expanded and window.minimumSizeHint().width() <= 720  # its buttons and statistics
 
 
 def test_headroom_and_notes_know_which_side_of_a_limit_a_sensor_is() -> None:
@@ -2691,3 +2713,202 @@ def test_a_card_header_click_hides_nothing(qtbot, settings) -> None:  # type: ig
         qtbot.mouseClick(section, Qt.MouseButton.LeftButton, pos=section.header.geometry().center())
     assert fans.view.isVisible() and gpu.grid.isVisible()  # no folding: "All sensors" is the one toggle
     assert "Expand all" not in [a.text() for a in window.settings_button.menu().actions()]
+
+
+def test_the_drawer_starts_shut_and_a_sensor_click_opens_it(qtbot, settings) -> None:  # type: ignore[no-untyped-def]
+    window = _open_window(qtbot, settings)
+    window.activateWindow()
+    qtbot.waitActive(window)
+    detail = window.detail
+    assert not detail.expanded and not detail.chart.isVisible() and detail.spark.isVisible()
+    assert detail.height() == detail.strip_height()  # the cards get the rest of the window
+    assert not window.close_focus_shortcut.isEnabled()  # Esc is left alone
+    grid = window.sections[GPU].grid
+    qtbot.mouseClick(grid, Qt.MouseButton.LeftButton, pos=grid.cells()[0].rect.center())
+    assert not detail.expanded and window.selected_key == grid.cells()[0].key  # it may be a double-click
+    qtbot.waitUntil(lambda: detail.expanded)
+    QApplication.processEvents()
+    assert detail.chart.isVisible() and not detail.spark.isVisible()
+    assert detail.height() > detail.strip_height()
+    assert window.close_focus_shortcut.isEnabled()
+    qtbot.keyClick(window.fahrenheit_button, Qt.Key.Key_Escape)  # from anywhere in the window
+    QApplication.processEvents()
+    assert not detail.expanded and detail.height() == detail.strip_height()
+    assert not window.close_focus_shortcut.isEnabled()
+
+
+def test_the_strip_opens_the_drawer_and_its_arrow_shuts_it(qtbot, settings) -> None:  # type: ignore[no-untyped-def]
+    window = _open_window(qtbot, settings)
+    detail = window.detail
+    assert detail.header.cursor().shape() == Qt.CursorShape.PointingHandCursor
+    qtbot.mouseClick(detail.title, Qt.MouseButton.LeftButton)  # a click anywhere on the strip
+    QApplication.processEvents()
+    assert detail.expanded and detail.height() > detail.strip_height()
+    assert detail.header.cursor().shape() == Qt.CursorShape.ArrowCursor  # open, the header is just text
+    detail.toggle.click()
+    QApplication.processEvents()
+    assert not detail.expanded and detail.height() == detail.strip_height()
+    qtbot.mouseClick(detail, Qt.MouseButton.LeftButton, pos=QPoint(detail.width() // 2, 3))  # its margin
+    assert detail.expanded
+    detail.toggle.click()
+    before = detail.strip_height()
+    detail.value.setStyleSheet("font-size: 60px")  # the strip grows taller after it's shut
+    QApplication.processEvents()
+    assert detail.strip_height() > before
+    assert detail.height() == detail.maximumHeight() == detail.strip_height()
+
+
+def test_the_drawer_reopens_at_the_height_it_was_left_at(qtbot, settings) -> None:  # type: ignore[no-untyped-def]
+    window = _open_window(qtbot, settings)
+    window._pick("gpu")
+    _settle(window)
+    QApplication.processEvents()
+    assert window.splitter.sizes()[1] == window.detail.minimumSizeHint().height() > 360  # 360 is under its minimum
+    window.splitter.moveSplitter(sum(window.splitter.sizes()) - 450, 1)
+    QApplication.processEvents()
+    height = window.splitter.sizes()[1]
+    assert int(settings.value("drawer_height")) == height and height > 400
+    window._escape()
+    window.splitter.moveSplitter(10, 1)  # a shut drawer doesn't move, and nothing is remembered
+    assert int(settings.value("drawer_height")) == height
+    window._pick("pkg")
+    _settle(window)
+    QApplication.processEvents()
+    assert window.splitter.sizes()[1] == height
+    total = sum(window.splitter.sizes())
+    window.splitter.setSizes([total - height - 50, height + 50])  # grown with the window, say
+    window._pick("gpu")
+    _settle(window)
+    assert window.splitter.sizes()[1] == height + 50  # open, another sensor doesn't snap it back
+    window._pick("pkg")
+    window._escape()  # shut straight after a click on another sensor: it stays shut
+    qtbot.wait(QApplication.doubleClickInterval() + 50)
+    assert not window.detail.expanded
+    again = _open_window(qtbot, settings)
+    again._pick("pkg")
+    _settle(again)
+    QApplication.processEvents()
+    assert again.splitter.sizes()[1] == height
+
+
+def test_the_drawer_leaves_the_cards_room_and_survives_a_bad_height(qtbot, settings) -> None:  # type: ignore[no-untyped-def]
+    settings.setValue("drawer_height", 5000)
+    window = _open_window(qtbot, settings)
+    window._pick("gpu")
+    _settle(window)
+    assert window.splitter.sizes()[0] >= 200  # never more than the window less some cards
+    settings.setValue("drawer_height", "inf")
+    assert _open_window(qtbot, settings)._drawer_height == 360
+
+
+def test_the_focus_view_steps_through_sensors_in_the_overviews_order(qtbot, settings) -> None:  # type: ignore[no-untyped-def]
+    window = _open_window(qtbot, settings)
+    window.activateWindow()
+    qtbot.waitActive(window)
+    focus = window.focus
+    previous, following = focus.step_buttons[-1], focus.step_buttons[1]
+    window.open_focus("mem")
+    assert previous.toolTip() == f"Previous: Hotspot temperature on {GPU}  (Ctrl+PgUp)"
+    assert following.toolTip() == f"Next: Power draw on {GPU}  (Ctrl+PgDn)"
+    following.click()  # the GPU card's list: temperatures, then power
+    assert window.focus_key == "gpuw" and focus.title.text() == "Power draw"
+    following.click()  # on to the next card
+    assert window.focus_key == "fan2" and window.selected_key == "fan2"
+    window.fahrenheit_button.setFocus()  # the keys work wherever the keyboard is
+    qtbot.keyClick(window.fahrenheit_button, Qt.Key.Key_PageUp, Qt.KeyboardModifier.ControlModifier)
+    assert window.focus_key == "gpuw"
+    qtbot.keyClick(window.fahrenheit_button, Qt.Key.Key_PageDown, Qt.KeyboardModifier.ControlModifier)
+    assert window.focus_key == "fan2"
+    window.open_focus("acpi")  # the last one steps round to the first
+    assert following.toolTip() == f"Next: CPU package on {CPU}  (Ctrl+PgDn)"
+    following.click()
+    assert window.focus_key == "pkg"
+    previous.click()
+    assert window.focus_key == "acpi"
+    window.close_focus()  # the keys do nothing on the overview
+    qtbot.keyClick(window.fahrenheit_button, Qt.Key.Key_PageDown, Qt.KeyboardModifier.ControlModifier)
+    assert window.focus_key is None and window.selected_key == "acpi"
+
+
+def test_stepping_keeps_to_the_filters_matches(qtbot, settings) -> None:  # type: ignore[no-untyped-def]
+    window = _open_window(qtbot, settings)
+    window.filter.setText("core")
+    window.open_focus("core/P-core 1")
+    assert [r.reading.key for r in window._step_order()][:2] == ["core/P-core 0", "core/P-core 1"]
+    assert "Next: E-core 0" in window.focus.step_buttons[1].toolTip()
+    window.filter.setText("vcore")
+    window.open_focus("vcore")  # the only match: nowhere to step
+    assert not window.focus.step_buttons[-1].isEnabled() and not window.focus.step_buttons[1].isEnabled()
+    assert window.focus.step_buttons[1].toolTip() == "Next sensor"
+    window.open_focus("pkg")  # from a sensor the filter doesn't match: on to its matches
+    assert window.focus.step_buttons[1].isEnabled()
+    window.focus.step_buttons[1].click()
+    assert window.focus_key == "vcore"
+
+
+def test_clicking_the_shown_sensor_again_shuts_the_drawer(qtbot, settings) -> None:  # type: ignore[no-untyped-def]
+    window = _open_window(qtbot, settings)
+    grid = window.sections[GPU].grid
+    first, second = grid.cells()[0], grid.cells()[1]
+
+    def click(cell) -> None:  # type: ignore[no-untyped-def]
+        qtbot.mouseClick(grid, Qt.MouseButton.LeftButton, pos=cell.rect.center())
+        _settle(window)
+
+    click(first)
+    assert window.detail.expanded and window.selected_key == first.key
+    click(second)  # another sensor: the drawer stays open and shows it
+    assert window.detail.expanded and window.selected_key == second.key
+    click(second)
+    assert not window.detail.expanded and window.selected_key == second.key
+    click(second)
+    assert window.detail.expanded
+
+
+def test_a_double_click_where_the_drawer_opens_reaches_the_focus_view(qtbot, settings) -> None:  # type: ignore[no-untyped-def]
+    from PySide6.QtTest import QTest
+
+    window = _open_window(qtbot, settings)
+    window.activateWindow()
+    qtbot.waitActive(window)
+    grid = window.sections[GPU].grid
+    cell = grid.cells()[0]
+    window.detail.set_expanded(True)  # to measure it, without the window knowing
+    lands = sum(window.splitter.sizes()) - window.detail.minimumSizeHint().height()  # the open drawer's top, at least
+    window.detail.set_expanded(False)
+
+    def at() -> QPoint:  # through the window, so Qt makes the double-click itself
+        return grid.mapTo(window, cell.rect.center())
+
+    assert grid.mapTo(window.splitter, cell.rect.center()).y() > lands  # under the drawer, once open
+    QTest.mouseDClick(window.windowHandle(), Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, at())
+    assert window.focus_key == cell.key
+    window.close_focus()  # straight back, before a click could have opened the drawer
+    qtbot.wait(QApplication.doubleClickInterval() + 50)
+    assert not window.detail.expanded  # the click it started with doesn't open the drawer behind it
+
+    QTest.mouseClick(window.windowHandle(), Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, at())
+    qtbot.waitUntil(lambda: window.detail.expanded)
+    qtbot.wait(50)
+    viewport = window.list_area.viewport()
+    assert viewport.rect().contains(grid.mapTo(viewport, cell.rect.center()))  # still in sight
+    QTest.mouseDClick(window.windowHandle(), Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, at())
+    assert window.focus_key == cell.key
+    qtbot.wait(QApplication.doubleClickInterval() + 50)
+    assert window.detail.expanded  # nor shut it, though it was the sensor the drawer showed
+
+    window.close_focus()  # a gauge sends its click on release, so the double-click's last one comes after
+    window._set_drawer(False)
+    gauge = window.gauges.gauges[0]
+    window.list_area.ensureWidgetVisible(gauge)
+    QApplication.processEvents()
+    QTest.mouseDClick(
+        window.windowHandle(),
+        Qt.MouseButton.LeftButton,
+        Qt.KeyboardModifier.NoModifier,
+        gauge.mapTo(window, gauge.rect().center()),
+    )
+    assert window.focus_key is not None
+    window.close_focus()
+    qtbot.wait(QApplication.doubleClickInterval() + 50)
+    assert not window.detail.expanded

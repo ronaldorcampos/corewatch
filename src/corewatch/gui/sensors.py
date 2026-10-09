@@ -3,9 +3,8 @@
 import math
 from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
 
-from PySide6.QtCore import QEvent, QPoint, QPointF, QRect, QRectF, QSize, Qt, Signal
+from PySide6.QtCore import QEvent, QPoint, QRect, QRectF, QSize, Qt, Signal
 from PySide6.QtGui import (
     QColor,
     QContextMenuEvent,
@@ -14,7 +13,6 @@ from PySide6.QtGui import (
     QHelpEvent,
     QMouseEvent,
     QPainter,
-    QPainterPath,
     QPaintEvent,
     QPen,
 )
@@ -29,15 +27,12 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from corewatch.gui.theme import BODY_FONT, DISPLAY_FONT, MONO_FONT, Theme, current_theme, font, paint_card
-from corewatch.gui.widgets import ElidedLabel, drawable_segments, value_range
+from corewatch.gui.cards import CardView, ViewData
+from corewatch.gui.theme import BODY_FONT, DISPLAY_FONT, MONO_FONT, current_theme, font, paint_card
+from corewatch.gui.widgets import ElidedLabel, draw_sparkline
 from corewatch.model import Kind, Row, format_limit, format_value
 from corewatch.monitor import KIND_ORDER
 
-if TYPE_CHECKING:  # cards.py draws sparklines with this module's helper
-    from corewatch.gui.cards import CardView, ViewData
-
-SPARKLINE_SECONDS = 60.0
 COLUMNS = 2
 
 KIND_TITLES = {
@@ -69,18 +64,6 @@ SUBHEAD_H = 28
 ROW_H = 30
 
 
-def recent(row: Row, seconds: float, now: float) -> list[tuple[float, float]]:
-    """The last ``seconds`` of history, walking back from the newest point only as far as needed."""
-    cutoff = now - seconds
-    points = []
-    for point in reversed(row.stats.history):
-        if point[0] < cutoff:
-            break
-        points.append(point)
-    points.reverse()
-    return points
-
-
 def short_label(row: Row) -> str:
     """Under a "Load" or "Clocks" heading, "P-core 3 load" reads better as "P-core 3"."""
     label = row.reading.label
@@ -88,41 +71,6 @@ def short_label(row: Row) -> str:
         if row.reading.kind is kind and label.endswith(suffix) and len(label) > len(suffix):
             return label.removesuffix(suffix)
     return label
-
-
-def draw_sparkline(painter: QPainter, rect: QRectF, row: Row, now: float, gap: float, theme: Theme) -> None:
-    points = recent(row, SPARKLINE_SECONDS, now)
-    if not points:
-        return
-    low, high = value_range([v for _, v in points], row.reading.kind)
-    color = theme.status(row.reading.status)
-
-    def to_xy(t: float, v: float) -> QPointF:
-        x = rect.left() + (t - (now - SPARKLINE_SECONDS)) / SPARKLINE_SECONDS * rect.width()
-        return QPointF(x, rect.bottom() - (v - low) / (high - low) * rect.height())
-
-    painter.save()
-    painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-    painter.setPen(QPen(color, 1.5))
-    painter.setBrush(Qt.BrushStyle.NoBrush)
-    # One low/high pair per two pixels is all a 72 px line can show.
-    for segment in drawable_segments(points, now - SPARKLINE_SECONDS, SPARKLINE_SECONDS, int(rect.width()) // 2, gap):
-        if len(segment) == 1:  # a lone reading between gaps: a dot, since a one-point path draws nothing
-            painter.setBrush(color)
-            painter.setPen(Qt.PenStyle.NoPen)
-            painter.drawEllipse(to_xy(*segment[0]), 1.5, 1.5)
-            painter.setPen(QPen(color, 1.5))
-            painter.setBrush(Qt.BrushStyle.NoBrush)
-            continue
-        path = QPainterPath(to_xy(*segment[0]))
-        for point in segment[1:]:
-            path.lineTo(to_xy(*point))
-        painter.drawPath(path)
-    if now - points[-1][0] <= gap:  # only mark "now" if the sensor is still reporting
-        painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(color)
-        painter.drawEllipse(to_xy(*points[-1]), 2.2, 2.2)
-    painter.restore()
 
 
 @dataclass(frozen=True)
@@ -372,7 +320,6 @@ class SensorGrid(QWidget):
     def contextMenuEvent(self, event: QContextMenuEvent) -> None:
         key = self.key_at(event.pos())
         if key is not None:
-            self.selected.emit(key)
             self.context_requested.emit(key, event.globalPos())
 
     def mouseMoveEvent(self, event: QMouseEvent) -> None:
@@ -409,7 +356,7 @@ class CategorySection(QFrame):
         self,
         device: str,
         parent: QWidget | None = None,
-        view: "CardView | None" = None,
+        view: CardView | None = None,
         show_table: bool = False,
     ) -> None:
         super().__init__(parent)
@@ -480,7 +427,7 @@ class CategorySection(QFrame):
         if user:
             self.table_toggled.emit(self.device, shown)
 
-    def set_view_data(self, data: "ViewData", filtering: bool) -> None:
+    def set_view_data(self, data: ViewData, filtering: bool) -> None:
         self.filtering = filtering
         if self.view is not None:
             self.view.set_data(data)

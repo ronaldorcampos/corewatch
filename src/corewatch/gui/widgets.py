@@ -5,7 +5,7 @@ import math
 import time
 from collections.abc import Callable, Sequence
 
-from PySide6.QtCore import QEvent, QPointF, QRectF, QSize, Qt, Signal
+from PySide6.QtCore import QEvent, QMargins, QPointF, QRectF, QSize, Qt, Signal
 from PySide6.QtGui import (
     QColor,
     QFont,
@@ -27,11 +27,12 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QPushButton,
+    QToolButton,
     QVBoxLayout,
     QWidget,
 )
 
-from corewatch.gui.theme import DISPLAY_FONT, MONO_FONT, current_theme, font, paint_card, px
+from corewatch.gui.theme import DISPLAY_FONT, MONO_FONT, Theme, current_theme, font, paint_card, px
 from corewatch.model import (
     Kind,
     Row,
@@ -138,6 +139,57 @@ def split_on_gaps(points: Sequence[tuple[float, float]], gap: float) -> list[lis
         else:
             segments.append([point])
     return segments
+
+
+QWIDGET_MAX = 16777215  # Qt's QWIDGETSIZE_MAX: no maximum
+SPARKLINE_SECONDS = 60.0
+
+
+def recent(row: Row, seconds: float, now: float) -> list[tuple[float, float]]:
+    """The last ``seconds`` of history, walking back from the newest point only as far as needed."""
+    cutoff = now - seconds
+    points = []
+    for point in reversed(row.stats.history):
+        if point[0] < cutoff:
+            break
+        points.append(point)
+    points.reverse()
+    return points
+
+
+def draw_sparkline(painter: QPainter, rect: QRectF, row: Row, now: float, gap: float, theme: Theme) -> None:
+    points = recent(row, SPARKLINE_SECONDS, now)
+    if not points:
+        return
+    low, high = value_range([v for _, v in points], row.reading.kind)
+    color = theme.status(row.reading.status)
+
+    def to_xy(t: float, v: float) -> QPointF:
+        x = rect.left() + (t - (now - SPARKLINE_SECONDS)) / SPARKLINE_SECONDS * rect.width()
+        return QPointF(x, rect.bottom() - (v - low) / (high - low) * rect.height())
+
+    painter.save()
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+    painter.setPen(QPen(color, 1.5))
+    painter.setBrush(Qt.BrushStyle.NoBrush)
+    # One low/high pair per two pixels is all a 72 px line can show.
+    for segment in drawable_segments(points, now - SPARKLINE_SECONDS, SPARKLINE_SECONDS, int(rect.width()) // 2, gap):
+        if len(segment) == 1:  # a lone reading between gaps: a dot, since a one-point path draws nothing
+            painter.setBrush(color)
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.drawEllipse(to_xy(*segment[0]), 1.5, 1.5)
+            painter.setPen(QPen(color, 1.5))
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            continue
+        path = QPainterPath(to_xy(*segment[0]))
+        for point in segment[1:]:
+            path.lineTo(to_xy(*point))
+        painter.drawPath(path)
+    if now - points[-1][0] <= gap:  # only mark "now" if the sensor is still reporting
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(color)
+        painter.drawEllipse(to_xy(*points[-1]), 2.2, 2.2)
+    painter.restore()
 
 
 class HistoryChart(QWidget):
@@ -492,12 +544,35 @@ def _clock(timestamp: float | None, to_wall: Callable[[float], float]) -> str:
     return time.strftime("%H:%M:%S", time.localtime(to_wall(timestamp))) if timestamp is not None else ""
 
 
+class Sparkline(QWidget):
+    """A sensor's last minute, small, for the shut drawer's strip."""
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.row: Row | None = None
+        self.now, self.gap = 0.0, 5.0
+        self.setFixedSize(px(96), px(28))
+
+    def set_row(self, row: Row | None, now: float, gap: float) -> None:
+        self.row, self.now, self.gap = row, now, gap
+        self.update()
+
+    def paintEvent(self, event: QPaintEvent) -> None:
+        if self.row is None:
+            return
+        painter = QPainter(self)
+        rect = QRectF(self.rect()).adjusted(2, 4, -4, -4)
+        draw_sparkline(painter, rect, self.row, self.now, self.gap, current_theme())
+        painter.end()
+
+
 class DetailPanel(QFrame):
     """The lower half of the window: a big chart and every statistic for one sensor."""
 
     window_changed = Signal(float)
     pin_toggled = Signal(bool)
     focus_requested = Signal()
+    expanded_changed = Signal(bool)  # opened or shut with a click on its strip or its arrow
 
     WINDOWS = ((60.0, "1 min"), (300.0, "5 min"), (900.0, "15 min"))
     STATS = (
@@ -526,11 +601,14 @@ class DetailPanel(QFrame):
         self.setObjectName("card")
         self.window_seconds = 300.0
         self._value_color = ""
+        self.expanded = False  # a drawer: shut, it's a one-line strip under the cards
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(16, 14, 16, 14)
+        self._margins = QMargins(16, 14, 16, 14)
+        layout.setContentsMargins(self._margins)
         layout.setSpacing(10)
 
         header = QHBoxLayout()
+        header.setContentsMargins(0, 0, 0, 0)
         titles = QVBoxLayout()
         titles.setSpacing(0)
         self.title = ElidedLabel("No sensor selected", shortest=90)
@@ -544,6 +622,8 @@ class DetailPanel(QFrame):
         self.value = QLabel("")
         self.value.setObjectName("detailValue")
         header.addWidget(self.value)
+        self.spark = Sparkline()  # the last minute, while the chart is folded away
+        header.addWidget(self.spark)
         header.addSpacing(16)
         self.pin_button = QPushButton("Pin to tray")
         self.pin_button.setCheckable(True)
@@ -557,7 +637,20 @@ class DetailPanel(QFrame):
         self.focus_button.setToolTip("Focus view: this sensor across the whole window (or double-click any sensor)")
         self.focus_button.clicked.connect(self.focus_requested)
         header.addWidget(self.focus_button)
-        header.addSpacing(8)
+        self.toggle = QToolButton()
+        self.toggle.setObjectName("drawerToggle")
+        self.toggle.clicked.connect(lambda: self.set_expanded(not self.expanded, user=True))
+        header.addWidget(self.toggle)
+        self.header = QWidget()
+        self.header.setLayout(header)
+        layout.addWidget(self.header)
+
+        # The chart's minutes get a row of their own over it: in the header, beside a wide value
+        # like "326.2 KB/s", they'd make the open drawer wider than the narrowest window.
+        self.window_row = QWidget()
+        windows = QHBoxLayout(self.window_row)
+        windows.setContentsMargins(0, 0, 0, 0)
+        windows.addStretch(1)
         self.window_buttons = QButtonGroup(self)
         self.window_buttons.setExclusive(True)
         for seconds, text in self.WINDOWS:
@@ -567,13 +660,15 @@ class DetailPanel(QFrame):
             button.setToolTip(f"Show the last {text}")
             button.clicked.connect(lambda _=False, s=seconds: self.set_window(s))
             self.window_buttons.addButton(button)
-            header.addWidget(button)
-        layout.addLayout(header)
+            windows.addWidget(button)
+        layout.addWidget(self.window_row)
 
         self.chart = HistoryChart()
         layout.addWidget(self.chart, 1)
 
-        grid = QGridLayout()
+        self.stats_box = QWidget()
+        grid = QGridLayout(self.stats_box)
+        grid.setContentsMargins(0, 0, 0, 0)
         grid.setHorizontalSpacing(24)
         grid.setVerticalSpacing(8)
         self.stat_values: dict[str, QLabel] = {}
@@ -593,10 +688,51 @@ class DetailPanel(QFrame):
             self.stat_values[key] = value
         for column in range(4):
             grid.setColumnStretch(column, 1)
-        layout.addLayout(grid)
+        layout.addWidget(self.stats_box)
         self.limits = QLabel("")
         self.limits.setObjectName("muted")
         layout.addWidget(self.limits)
+        self.set_expanded(False)
+
+    def set_expanded(self, expanded: bool, user: bool = False) -> None:
+        """Open the drawer to the chart and every statistic, or shut it to its strip: the sensor,
+        its value and its last minute. ``user`` marks a click."""
+        self.expanded = expanded
+        for widget in (self.window_row, self.chart, self.stats_box, self.limits, self.subtitle, self.pin_button):
+            widget.setVisible(expanded)
+        self.spark.setVisible(not expanded)
+        self.toggle.setArrowType(Qt.ArrowType.DownArrow if expanded else Qt.ArrowType.UpArrow)
+        self.toggle.setAccessibleName("Hide the chart" if expanded else "Show the chart")
+        self.toggle.setToolTip("Hide the chart (Esc)" if expanded else "Show the chart and every statistic")
+        self.header.setToolTip("" if expanded else "Click to show the chart")
+        # Only the shut strip opens on a click; open, its title and value are just text.
+        if expanded:
+            self.header.unsetCursor()
+        else:
+            self.header.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setMaximumHeight(QWIDGET_MAX if expanded else self.strip_height())
+        if user:
+            self.expanded_changed.emit(expanded)
+
+    def strip_height(self) -> int:
+        """How tall the drawer is when shut."""
+        margins = self._margins
+        return self.header.sizeHint().height() + margins.top() + margins.bottom()
+
+    def event(self, event: QEvent) -> bool:
+        handled = super().event(event)
+        # The strip's height follows its text, its font and the style, which can all change after
+        # it's shut; the window's styling arrives only once it's shown.
+        if event.type() == QEvent.Type.LayoutRequest and not self.expanded:
+            self.setMaximumHeight(self.strip_height())
+        return handled
+
+    def mouseReleaseEvent(self, event: QMouseEvent) -> None:
+        # A click on the strip (its margins too), away from its buttons, opens the drawer.
+        if event.button() == Qt.MouseButton.LeftButton and not self.expanded:
+            self.set_expanded(True, user=True)
+            return
+        super().mouseReleaseEvent(event)
 
     def paintEvent(self, event: QPaintEvent) -> None:
         painter = QPainter(self)
@@ -632,6 +768,7 @@ class DetailPanel(QFrame):
         can_pin: bool = True,
     ) -> None:
         self.chart.set_data(row, self.window_seconds, fahrenheit, gap, now, to_wall)
+        self.spark.set_row(row, now, gap)
         self.focus_button.setEnabled(row is not None)
         if row is None:
             self.pin_button.setEnabled(False)
