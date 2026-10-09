@@ -183,6 +183,7 @@ class ChannelInfo:
     # When set, the value is value_file as a percentage of this file (VRAM used of total).
     ratio_of: str | None = None
     empty_if_idle: bool = False
+    integrated: bool = False  # an APU's graphics (see Reading.integrated)
 
 
 @dataclass(frozen=True)
@@ -279,10 +280,10 @@ class HwmonSource:
         )
         channels = [self._describe(chip, chip_id, channel, profile, context) for channel in found]
         if name == "amdgpu":
-            channels += self._amdgpu_extras(chip, chip_id)
+            channels += self._amdgpu_extras(chip, chip_id, context.is_apu)
         return ChipInfo(device, channels, now, sleeps=name in INTEL_GPU_DRIVERS)
 
-    def _amdgpu_extras(self, chip: Path, chip_id: str) -> list[ChannelInfo]:
+    def _amdgpu_extras(self, chip: Path, chip_id: str, integrated: bool) -> list[ChannelInfo]:
         """GPU load and VRAM use, which amdgpu publishes next to (not inside) its hwmon folder."""
         extras = []
         if (chip / "device" / "gpu_busy_percent").exists():
@@ -297,6 +298,7 @@ class HwmonSource:
                     high=None,
                     crit=None,
                     companion=None,
+                    integrated=integrated,
                 )
             )
         if (chip / "device" / "mem_info_vram_used").exists() and (chip / "device" / "mem_info_vram_total").exists():
@@ -312,6 +314,7 @@ class HwmonSource:
                     crit=None,
                     companion=None,
                     ratio_of="device/mem_info_vram_total",
+                    integrated=integrated,
                 )
             )
         return extras
@@ -476,6 +479,7 @@ class HwmonSource:
             # Any fan header may have nothing plugged in, except a graphics card's own fans,
             # which exist even while resting at 0 RPM.
             empty_if_idle=kind is Kind.FAN and not context.gpu,
+            integrated=context.is_apu,
         )
 
     def _friendly_label(self, label: str, kind: Kind, channel: Channel, context: ChipContext) -> str:
@@ -536,4 +540,5 @@ class HwmonSource:
             companion=info.companion,
             empty_if_idle=info.empty_if_idle,
             cap=info.cap,
+            integrated=info.integrated,
         )

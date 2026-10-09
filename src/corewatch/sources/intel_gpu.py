@@ -179,8 +179,21 @@ class IntelGpuSource:
             active = self._active_percent(gpu, idle)
             # i915 reports its clock limits without waking the GPU (checked on a UHD 770); xe may not.
             max_clock = self._limit(f"{key}/clock", gpu.max_clock_file, 1, idle and gpu.driver != "i915")
-            readings.append(Reading(f"{key}/clock", gpu.device, "Graphics clock", Kind.CLOCK, clock, cap=max_clock))
-            readings.append(Reading(f"{key}/active", gpu.device, "Active time", Kind.LOAD, active))
+            integrated = gpu.integrated
+            readings.append(
+                Reading(
+                    f"{key}/clock",
+                    gpu.device,
+                    "Graphics clock",
+                    Kind.CLOCK,
+                    clock,
+                    cap=max_clock,
+                    integrated=integrated,
+                )
+            )
+            readings.append(
+                Reading(f"{key}/active", gpu.device, "Active time", Kind.LOAD, active, integrated=integrated)
+            )
             for counter in gpu.energy:
                 name = f"{key}/power{counter.number}"
                 # µW; shown for reference, never a warning
@@ -188,7 +201,9 @@ class IntelGpuSource:
                 # Left blank while idle: a powered-down card still draws a little, and how much
                 # isn't known without reading the counter, which would keep it awake.
                 watts = None if idle else self._watts(gpu, counter)
-                readings.append(Reading(name, gpu.device, counter.label, Kind.POWER, watts, cap=power_limit))
+                readings.append(
+                    Reading(name, gpu.device, counter.label, Kind.POWER, watts, cap=power_limit, integrated=integrated)
+                )
         return readings
 
     def _limit(self, name: str, file: Path, divisor: int, asleep: bool) -> float | None:

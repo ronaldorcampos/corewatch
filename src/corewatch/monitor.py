@@ -23,6 +23,8 @@ KIND_ORDER = [
 # Devices are listed by these name prefixes; anything else goes last, in discovery order.
 DEVICE_ORDER = ["CPU", "Fans", "GPU", "Motherboard", "Memory", "NVMe", "Disk", "Network", "Wi-Fi"]
 FANS = "Fans"
+STORAGE = "Storage"
+STORAGE_PREFIXES = ("NVMe", "Disk")
 
 
 @dataclass(frozen=True)
@@ -213,4 +215,27 @@ def gather_fans(rows: Sequence[Row]) -> list[Row]:
         if len(devices_by_label[fan_label]) > 1:
             fan_label = f"{fan_label} ({reading.device.split(' · ', 1)[-1]})"
         gathered.append(Row(replace(reading, device=FANS, label=fan_label, origin=reading.device), row.stats))
+    return gathered
+
+
+def drive_name(device: str) -> str:
+    """The short name a drive goes by in the Storage card: ``nvme0`` for an NVMe drive, its
+    model for a SATA one (``Disk · ST4000DM004`` -> ``ST4000DM004``)."""
+    head, _, model = device.partition(" · ")
+    if head.startswith("NVMe "):
+        return head.removeprefix("NVMe ")
+    return model or head
+
+
+def gather_storage(rows: Sequence[Row]) -> list[Row]:
+    """Move every drive's sensors into one "Storage" card, like the fans. Labels gain the
+    drive's short name ("nvme0 Composite"), since every drive has a "Composite"; keys and
+    statistics are untouched, and ``origin`` keeps the real device."""
+    gathered = []
+    for row in rows:
+        reading = row.reading
+        if reading.device.startswith(STORAGE_PREFIXES):
+            label = f"{drive_name(reading.device)} {reading.label}"
+            row = Row(replace(reading, device=STORAGE, label=label, origin=reading.device), row.stats)
+        gathered.append(row)
     return gathered

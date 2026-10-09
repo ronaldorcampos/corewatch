@@ -3,6 +3,7 @@
 import math
 from collections.abc import Sequence
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 from PySide6.QtCore import QEvent, QPoint, QPointF, QRect, QRectF, QSize, Qt, Signal
 from PySide6.QtGui import (
@@ -28,10 +29,13 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from corewatch.gui.theme import Theme, current_theme
-from corewatch.gui.widgets import drawable_segments, value_range
+from corewatch.gui.theme import BODY_FONT, DISPLAY_FONT, MONO_FONT, Theme, current_theme, font, paint_card
+from corewatch.gui.widgets import ElidedLabel, drawable_segments, value_range
 from corewatch.model import Kind, Row, format_limit, format_value
 from corewatch.monitor import KIND_ORDER
+
+if TYPE_CHECKING:  # cards.py draws sparklines with this module's helper
+    from corewatch.gui.cards import CardView, ViewData
 
 SPARKLINE_SECONDS = 60.0
 COLUMNS = 2
@@ -131,6 +135,7 @@ class SensorGrid(QWidget):
     """Paints a device's sensors as a grid of cells, grouped under one heading per kind."""
 
     selected = Signal(str)
+    opened = Signal(str)  # a double-click: the sensor's focus view
     context_requested = Signal(str, QPoint)  # sensor key, global position
 
     def __init__(self, parent: QWidget | None = None) -> None:
@@ -162,7 +167,7 @@ class SensorGrid(QWidget):
             self.stat_widths = dict.fromkeys(STATS, 0)
         self.rows, self.now, self.fahrenheit, self.gap = list(rows), now, fahrenheit, gap
         if keys_changed:
-            metrics = QFontMetrics(self._fonts()[0])
+            metrics = QFontMetrics(self._fonts()[0])  # the label font
             longest = max((metrics.horizontalAdvance(short_label(r)) for r in self.rows), default=0)
             self.label_width = max(MIN_LABEL_W, min(MAX_LABEL_W, longest + 12))
         if self._fit_stat_widths() or keys_changed:
@@ -216,7 +221,7 @@ class SensorGrid(QWidget):
         header = QFontMetrics(self._fonts()[1])
         changed = False
         for name in STATS:
-            widest = header.horizontalAdvance(STAT_TITLES[name])
+            widest = header.horizontalAdvance(STAT_TITLES[name].upper())
             for row in self.rows:
                 widest = max(widest, metrics.horizontalAdvance(self._stat_text(row, name)))
             if widest + STAT_PAD > self.stat_widths[name]:
@@ -228,15 +233,15 @@ class SensorGrid(QWidget):
         shown = self.shown_stats()
         return PAD * 2 + MIN_LABEL_W + SPARK_MIN_W + sum(self.stat_widths[n] for n in shown) + GAP * (len(shown) + 1)
 
-    def _fonts(self) -> tuple[QFont, QFont, QFont]:
-        """(regular, small, bold), all with equal-width digits."""
-        base = QFont(self.font())
-        base.setFeature(QFont.Tag("tnum"), 1)
-        small = QFont(base)
-        small.setPixelSize(11)
-        bold = QFont(base)
-        bold.setBold(True)
-        return base, small, bold
+    def _fonts(self) -> tuple[QFont, QFont, QFont, QFont]:
+        """(label, header, value, other numbers): names in the body font, column and group
+        headings in spaced caps, numbers in the monospaced font (bold for the current value)."""
+        return (
+            font(BODY_FONT, 13),
+            font(DISPLAY_FONT, 10, QFont.Weight.DemiBold, 1.5),
+            font(MONO_FONT, 13, QFont.Weight.Bold),
+            font(MONO_FONT, 12),
+        )
 
     def _stat_text(self, row: Row, name: str) -> str:
         kind, stats, f = row.reading.kind, row.stats, self.fahrenheit
@@ -296,8 +301,8 @@ class SensorGrid(QWidget):
         theme = current_theme()
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        base, small, bold = self._fonts()
-        muted, text, border = QColor(theme.muted), QColor(theme.text), QColor(theme.border)
+        base, small, bold, numbers = self._fonts()
+        muted, text, border = QColor(theme.muted), QColor(theme.text), QColor(theme.edge)
         right = Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
         left = Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
 
@@ -305,15 +310,15 @@ class SensorGrid(QWidget):
         painter.setPen(muted)
         for header in self._headers:
             parts = self._parts(header)
-            painter.drawText(parts["label"], left, "Sensor")
-            painter.drawText(parts["spark"], left, "Last 60 s")
+            painter.drawText(parts["label"], left, "SENSOR")
+            painter.drawText(parts["spark"], left, "LAST 60 S")
             for name in self.shown_stats():
-                painter.drawText(parts[name], right, STAT_TITLES[name])
+                painter.drawText(parts[name], right, STAT_TITLES[name].upper())
 
         for rect, title in self._subheads:
             painter.setFont(small)
             painter.setPen(muted)
-            painter.drawText(rect.adjusted(PAD, 6, 0, 0), left, title)
+            painter.drawText(rect.adjusted(PAD, 6, 0, 0), left, title.upper())
             painter.setPen(QPen(border, 1))
             painter.drawLine(rect.left(), rect.bottom(), rect.right(), rect.bottom())
 
@@ -324,14 +329,12 @@ class SensorGrid(QWidget):
             if row is None:
                 continue
             rect = cell.rect
-            if cell.key == self.selected_key:
-                painter.setPen(Qt.PenStyle.NoPen)
-                painter.setBrush(QColor(theme.accent_soft))
-                painter.drawRoundedRect(QRectF(rect).adjusted(0, 1, 0, -1), 6, 6)
+            if cell.key == self.selected_key:  # tinted, with an accent bar down its left edge
+                band = QRectF(rect).adjusted(0, 1, 0, -1)
+                painter.fillRect(band, QColor(theme.accent_soft))
+                painter.fillRect(QRectF(band.left(), band.top(), 2, band.height()), QColor(theme.accent))
             elif cell.key == self._hover:
-                painter.setPen(Qt.PenStyle.NoPen)
-                painter.setBrush(QColor(theme.raised))
-                painter.drawRoundedRect(QRectF(rect).adjusted(0, 1, 0, -1), 6, 6)
+                painter.fillRect(QRectF(rect).adjusted(0, 1, 0, -1), QColor(theme.raised))
             selected = cell.key == self.selected_key
             label, value, minimum, maximum, average = self.cell_texts(cell.key)
             parts = self._parts(rect)
@@ -344,7 +347,7 @@ class SensorGrid(QWidget):
             painter.setFont(bold)
             painter.setPen(theme.value_color(row.reading.status))
             painter.drawText(parts["value"], right, value)
-            painter.setFont(base)
+            painter.setFont(numbers)
             painter.setPen(muted)
             for name, content in (("min", minimum), ("max", maximum), ("avg", average)):
                 if name in parts:
@@ -360,6 +363,11 @@ class SensorGrid(QWidget):
         key = self.key_at(event.position().toPoint())
         if key is not None and event.button() == Qt.MouseButton.LeftButton:
             self.selected.emit(key)
+
+    def mouseDoubleClickEvent(self, event: QMouseEvent) -> None:
+        key = self.key_at(event.position().toPoint())
+        if key is not None and event.button() == Qt.MouseButton.LeftButton:
+            self.opened.emit(key)
 
     def contextMenuEvent(self, event: QContextMenuEvent) -> None:
         key = self.key_at(event.pos())
@@ -392,14 +400,25 @@ class SensorGrid(QWidget):
 
 
 class CategorySection(QFrame):
-    """A card for one device: a header that folds it, then its sensor grid."""
+    """A card for one device: a header that folds it, then its compact view (if it has one) and
+    its full sensor list, shown on demand under the view."""
 
     collapse_toggled = Signal(str, bool)
+    table_toggled = Signal(str, bool)  # "All sensors" switched on or off by a click
 
-    def __init__(self, device: str, collapsed: bool, parent: QWidget | None = None) -> None:
+    def __init__(
+        self,
+        device: str,
+        collapsed: bool,
+        parent: QWidget | None = None,
+        view: "CardView | None" = None,
+        show_table: bool = False,
+    ) -> None:
         super().__init__(parent)
         self.device = device
         self.collapsed: bool = collapsed
+        self.show_table = show_table
+        self.filtering = False
         self.setObjectName("card")
         layout = QVBoxLayout(self)
         layout.setContentsMargins(14, 10, 14, 10)
@@ -418,26 +437,78 @@ class CategorySection(QFrame):
         self.chevron.setAutoRaise(True)
         self.chevron.clicked.connect(lambda: self.set_collapsed(not self.collapsed, user=True))
         header.addWidget(self.chevron)
-        self.title = QLabel(device)
+        self.title = ElidedLabel(device)
         self.title.setObjectName("sectionTitle")
         header.addWidget(self.title)
         self.count = QLabel("")
         self.count.setObjectName("muted")
         header.addWidget(self.count)
         header.addStretch(1)
+        # A card with a compact view opens on it; this shows its full list under it too.
+        self.table_button = QToolButton()
+        self.table_button.setObjectName("tableToggle")
+        self.table_button.setText("All sensors")
+        self.table_button.setCheckable(True)
+        self.table_button.setChecked(show_table)
+        self.table_button.setToolTip("Show every sensor on this card, with its min, max and average")
+        self.table_button.clicked.connect(lambda shown: self.set_show_table(shown, user=True))
+        header.addWidget(self.table_button)
         layout.addWidget(self.header)
 
+        self.view = view
+        if view is not None:
+            layout.addWidget(view)
         self.grid = SensorGrid()
         layout.addWidget(self.grid)
+        layout.addStretch(1)  # beside a taller card, keep this one's content at the top
         self.set_collapsed(collapsed)
+
+    def paintEvent(self, event: QPaintEvent) -> None:
+        painter = QPainter(self)
+        paint_card(painter, QRectF(self.rect()), current_theme())
+        painter.end()
+
+    def has_view(self) -> bool:
+        """True while the compact view is what the card opens on (not while filtering: then the
+        card lists the sensors that match)."""
+        return self.view is not None and not self.view.is_empty() and not self.filtering
+
+    def table_shown(self) -> bool:
+        return not self.has_view() or self.show_table
+
+    def _sync(self) -> None:
+        if self.view is not None:
+            self.view.setVisible(not self.collapsed and self.has_view())
+        self.grid.setVisible(not self.collapsed and self.table_shown())
+        self.table_button.setVisible(self.has_view())
+        # As tall with the button as without it, so cards side by side line their titles up.
+        self.header.setMinimumHeight(self.table_button.sizeHint().height())
 
     def set_collapsed(self, collapsed: bool, user: bool = False) -> None:
         """``user`` marks a click (remembered); filtering expands sections without remembering it."""
         self.collapsed = collapsed
-        self.grid.setVisible(not collapsed)
+        self._sync()
         self.chevron.setArrowType(Qt.ArrowType.RightArrow if collapsed else Qt.ArrowType.DownArrow)
         if user:
             self.collapse_toggled.emit(self.device, collapsed)
+
+    def set_show_table(self, shown: bool, user: bool = False) -> None:
+        self.show_table = shown
+        self.table_button.setChecked(shown)
+        self._sync()
+        if user:
+            self.table_toggled.emit(self.device, shown)
+
+    def set_view_data(self, data: "ViewData", filtering: bool) -> None:
+        self.filtering = filtering
+        if self.view is not None:
+            self.view.set_data(data)
+        self._sync()
+
+    def set_selected(self, key: str | None) -> None:
+        self.grid.set_selected(key)
+        if self.view is not None:
+            self.view.set_selected(key)
 
     def set_rows(self, rows: Sequence[Row], now: float, fahrenheit: bool, gap: float) -> None:
         self.count.setText(f"{len(rows)} sensor{'s' if len(rows) != 1 else ''}")

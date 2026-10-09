@@ -180,3 +180,28 @@ def test_fans_card_keeps_origin_and_tells_same_named_fans_apart() -> None:
     }
     assert {r.device for r in gathered.values()} == {"Fans"}
     assert gathered["d"].origin == "GPU · RTX 4070"
+
+
+def test_drives_share_one_storage_card_under_their_short_names() -> None:
+    from corewatch.model import Kind, Reading, Row
+    from corewatch.monitor import drive_name, gather_storage
+
+    assert [
+        drive_name(d) for d in ("NVMe nvme0 · Samsung SSD 980", "NVMe · WD Blue", "NVMe", "Disk · ST4000", "Disk")
+    ] == ["nvme0", "WD Blue", "NVMe", "ST4000", "Disk"]
+    rows = [
+        Row(Reading("n0", "NVMe nvme0 · Samsung SSD 980", "Composite", Kind.TEMPERATURE, 34.0)),
+        Row(Reading("n1", "NVMe nvme1 · Samsung SSD 970", "Composite", Kind.TEMPERATURE, 30.0)),
+        Row(Reading("sata", "Disk · ST4000", "Temperature", Kind.TEMPERATURE, 29.0)),
+        Row(Reading("cpu", "CPU · i7", "CPU package", Kind.TEMPERATURE, 50.0)),
+    ]
+    gathered = {r.reading.key: r for r in gather_storage(rows)}
+    assert [r.reading.key for r in gather_storage(rows)] == ["n0", "n1", "sata", "cpu"]  # order kept
+    assert {k: (r.reading.device, r.reading.label) for k, r in gathered.items()} == {
+        "n0": ("Storage", "nvme0 Composite"),
+        "n1": ("Storage", "nvme1 Composite"),
+        "sata": ("Storage", "ST4000 Temperature"),
+        "cpu": ("CPU · i7", "CPU package"),  # not a drive: untouched
+    }
+    assert gathered["n1"].reading.origin == "NVMe nvme1 · Samsung SSD 970"
+    assert gathered["n0"].stats is rows[0].stats  # the same statistics, not a fresh start

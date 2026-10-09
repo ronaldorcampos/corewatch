@@ -80,6 +80,7 @@ def test_amd_graphics_card_gets_readable_names_limits_and_its_model(tmp_path: Pa
     assert readings["GPU load"].value == 37.0
     assert round(readings["Video memory used"].value, 2) == 8.33
     assert readings["Fan 1"].kind is Kind.FAN and readings["Fan 1 speed"].kind is Kind.FAN_DUTY
+    assert not any(r.integrated for r in readings.values())  # a graphics card of its own
 
 
 def test_an_amd_gpu_fan_resting_at_zero_rpm_stays_visible(tmp_path: Path, proc_root: Path) -> None:
@@ -106,6 +107,7 @@ def test_amd_apu_power_covers_the_whole_chip(tmp_path: Path, proc_root: Path) ->
     readings = {r.label: r for r in src.sample()}
     assert "Power draw (CPU and GPU)" in readings and "SoC voltage" in readings
     assert {r.device for r in readings.values()} == {"GPU · AMD Raphael"}  # no bracketed name: the codename
+    assert all(r.integrated for r in readings.values())  # its power overlaps the CPU's
 
 
 def test_product_name_wins_over_the_pci_database(tmp_path: Path, proc_root: Path) -> None:

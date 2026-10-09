@@ -1,5 +1,6 @@
 import json
 import os
+from dataclasses import replace
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -8,7 +9,7 @@ from pathlib import Path
 import pytest
 from fakes import FakeSource, load, temp
 from PySide6.QtCore import QEvent, QObject, QPoint, QRect, QSettings, Qt, Signal
-from PySide6.QtGui import QImage
+from PySide6.QtGui import QColor, QImage
 from PySide6.QtWidgets import QApplication, QLabel
 
 from corewatch.gui import theme
@@ -26,6 +27,15 @@ class Clock:
     def __call__(self) -> float:
         self.now += 1.0
         return self.now
+
+
+@pytest.fixture(scope="module", autouse=True)
+def bundled_fonts(qapp):  # type: ignore[no-untyped-def]
+    """Measure and paint every GUI test in the fonts the app really uses, at the designed text size
+    whatever the desktop running the tests is set to."""
+    families = theme.load_fonts()
+    theme._text_scale = 1.0
+    return families
 
 
 @pytest.fixture
@@ -113,7 +123,7 @@ def test_unit_toggle_filter_and_reset(qtbot, settings) -> None:  # type: ignore[
     assert window.sections["GPU · RTX"].isHidden()
 
     window.filter.clear()
-    window.reset_button.click()
+    window.reset_action.trigger()
     assert texts(window, "pkg")[2] == "—"  # statistics start over at the next reading
 
 
@@ -252,7 +262,7 @@ def test_reset_clears_stats_without_taking_a_reading(qtbot, settings) -> None:  
     window = make_window(qtbot, settings, SCRIPT)
     window.refresh()
     calls = window.monitor.sources[0].calls
-    window.reset_button.click()
+    window.reset_action.trigger()
     assert window.monitor.sources[0].calls == calls
     assert texts(window, "pkg")[1:] == ["85.0 °C", "—", "—", "—"]  # value stays, statistics start over
     assert window.detail.stat_values["average"].text() == "—"
@@ -397,16 +407,16 @@ def test_decimate_keeps_extremes() -> None:
 def test_min_max_toggle_hides_the_columns_and_is_remembered(qtbot, settings) -> None:  # type: ignore[no-untyped-def]
     window = make_window(qtbot, settings, SCRIPT)
     grid = window.sections["CPU · i7"].grid
-    assert window.min_max_button.isChecked() and grid.shown_stats() == ("value", "min", "max", "avg")
+    assert window.min_max_action.isChecked() and grid.shown_stats() == ("value", "min", "max", "avg")
     with_columns = grid.cell_min_width()
-    window.min_max_button.click()
+    window.min_max_action.trigger()
     assert grid.shown_stats() == ("value", "avg")
     assert grid.cell_min_width() < with_columns  # the space goes back to the cell
     parts = grid._parts(grid.cells()[0].rect)
     assert "min" not in parts and "max" not in parts
     assert settings.value("show_min_max", type=bool) is False
     reopened = make_window(qtbot, settings, SCRIPT)
-    assert not reopened.min_max_button.isChecked()
+    assert not reopened.min_max_action.isChecked()
     assert reopened.sections["CPU · i7"].grid.shown_stats() == ("value", "avg")
     grid.grab()  # paints without the hidden columns
 
@@ -596,7 +606,7 @@ def test_fans_from_every_device_share_one_card(qtbot, settings) -> None:  # type
         ]
     ]
     window = make_window(qtbot, settings, script)
-    assert list(window.sections) == ["CPU · i7", "Fans", "GPU · RTX"]
+    assert list(window.sections) == ["CPU · i7", "GPU · RTX", "Fans"]  # wide cards first, then the halves
     labels = {c.key: texts(window, c.key)[0] for c in window.sections["Fans"].grid.cells()}
     assert labels == {"mb-fan": "Fan 2", "gpu-rpm": "GPU fan 1", "gpu-pct": "GPU fan 1 speed"}
     assert [c.key for c in window.sections["GPU · RTX"].grid.cells()] == ["gpu"]
@@ -723,7 +733,7 @@ def test_tray_icons_and_menus_are_freed_when_unpinned(qtbot, settings) -> None: 
         pass
 
     window.attach_tray(lambda: QtTray())  # type: ignore[arg-type]
-    before = len(window.findChildren(QMenu))  # the ⋯ menu, corewatch's tray menu and their submenus
+    before = len(window.findChildren(QMenu))  # the settings menu, corewatch's tray menu and their submenus
     for _ in range(3):
         window.set_pinned("gpu", True)
         window.set_pinned("gpu", False)
@@ -776,7 +786,7 @@ def test_start_at_login_toggle_writes_and_removes_the_autostart_entry(qtbot, set
     assert entry.exists() and "X-Corewatch-Autostart=true" in entry.read_text()
     assert "will start when you log in (runs " in window.statusBar().currentMessage()
     entry.unlink()  # removed from the desktop's Startup Applications instead
-    window._sync_autostart()  # (runs whenever the ⋯ menu opens)
+    window._sync_autostart()  # (runs whenever the settings menu opens)
     assert not window.autostart_action.isChecked()
     window.autostart_action.setChecked(True)
     window.autostart_action.setChecked(False)
@@ -924,7 +934,7 @@ def test_pinned_tray_menu_lists_name_min_max_and_average(qtbot, settings) -> Non
     assert texts()[3] == "min: 122.0 °F"
 
 
-def test_the_logo_replaces_the_name_in_the_toolbar_and_is_the_window_icon(qtbot, settings) -> None:  # type: ignore[no-untyped-def]
+def test_the_logo_leads_the_toolbar_and_is_the_window_icon(qtbot, settings) -> None:  # type: ignore[no-untyped-def]
     from corewatch.gui.app import LOGO_SIZE, app_icon
 
     window = make_window(qtbot, settings, SCRIPT)
@@ -933,7 +943,8 @@ def test_the_logo_replaces_the_name_in_the_toolbar_and_is_the_window_icon(qtbot,
     assert not pixmap.isNull() and pixmap.width() >= LOGO_SIZE
     assert window.logo.toolTip() == "corewatch" and window.logo.accessibleName() == "corewatch"
     assert not window.windowIcon().isNull()
-    assert not any(label.text() == "corewatch" for label in window.findChildren(QLabel))  # no text title left
+    labels = [label.text() for label in window.findChildren(QLabel)]
+    assert "COREWATCH" in labels and any(text.startswith("HOST ") for text in labels)  # name and host beside it
 
 
 def test_the_icon_ships_inside_the_package() -> None:
@@ -971,6 +982,7 @@ def test_corewatchs_tray_menu_has_the_apps_options(qtbot, settings, monkeypatch)
         "Open corewatch",
         "---",
         "Reset min/max",
+        "---",
         "Update every",
         "Temperatures in",
         "Show min / max in the list",
@@ -979,6 +991,7 @@ def test_corewatchs_tray_menu_has_the_apps_options(qtbot, settings, monkeypatch)
         "Show unused sensors",
         "Expand all",
         "Collapse all",
+        "Show this computer's name",
         "---",
         "Keep running in the tray when closed",
         "Start when I log in",
@@ -986,8 +999,8 @@ def test_corewatchs_tray_menu_has_the_apps_options(qtbot, settings, monkeypatch)
         "---",
         "Quit",
     ]
-    assert texts(window.menu_button.menu())[0] == "Theme"  # the ⋯ menu has the same options from Theme down
-    assert texts(window.menu_button.menu()) == texts(logo.menu)[7:]
+    # The settings button holds the same options as the tray icon, minus opening the window.
+    assert texts(window.settings_button.menu()) == texts(logo.menu)[2:]
     assert texts(pinned.menu)[-1] == "Unpin CPU package"  # a pinned icon's menu is about its sensor only
     assert "Quit" not in texts(pinned.menu)
 
@@ -1013,8 +1026,8 @@ def test_corewatchs_tray_menu_has_the_apps_options(qtbot, settings, monkeypatch)
     window.celsius_button.click()
     assert not window.fahrenheit and units["Celsius (°C)"].isChecked()
     item("Show min / max in the list").trigger()
-    assert not window.show_min_max and not window.min_max_button.isChecked()
-    window.min_max_button.click()
+    assert not window.show_min_max and not window.min_max_action.isChecked()
+    window.set_show_min_max(True)
     assert window.show_min_max and item("Show min / max in the list").isChecked()
     dark = next(a for a in item("Theme").menu().actions() if a.text() == "Dark")
     dark.trigger()
@@ -1104,3 +1117,1613 @@ def test_the_tray_shows_the_one_colour_logo(qtbot, settings) -> None:  # type: i
     window.attach_tray(Tray)  # type: ignore[arg-type]
     pixel = icons[0].pixmap(64, 64).toImage().pixelColor(32, 32)  # type: ignore[attr-defined]
     assert (pixel.red(), pixel.green(), pixel.blue()) == (255, 255, 255)  # the core, not the colour logo's amber
+
+
+def test_settings_menu_leads_with_reset_and_ctrl_r_still_resets(qtbot, settings) -> None:  # type: ignore[no-untyped-def]
+    window = make_window(qtbot, settings, SCRIPT)
+    first = window.settings_button.menu().actions()[0]
+    assert first is window.reset_action and first.text() == "Reset min/max"
+    assert window.reset_shortcut.key().toString() == "Ctrl+R"
+    assert window.reset_action.shortcut().isEmpty()  # so the tray menu shows no shortcut it can't honour
+    with qtbot.waitActive(window):
+        window.show()
+        window.activateWindow()
+    window.refresh()
+    assert texts(window, "pkg")[2] != "—"
+    qtbot.keyClick(window.filter, Qt.Key.Key_R, Qt.KeyboardModifier.ControlModifier)  # focus in the filter box
+    assert texts(window, "pkg")[2] == "—"
+    assert window.settings_button.accessibleName() == "Settings"
+    assert not window.settings_button.icon().isNull()
+
+
+def test_live_chip_shows_the_update_interval(qtbot, settings) -> None:  # type: ignore[no-untyped-def]
+    window = make_window(qtbot, settings, SCRIPT)
+    window.set_interval(2.0)
+    assert window.live_chip.text().endswith("LIVE · 2 s")
+    window.refresh()
+    window.set_interval(0.25)  # a reading 2 s old isn't overdue under the new, shorter interval
+    assert window.live_chip.text().endswith("LIVE · 0.25 s")
+
+
+def test_bundled_fonts_load_with_their_licences(bundled_fonts) -> None:  # type: ignore[no-untyped-def]
+    from importlib.resources import files
+
+    from PySide6.QtGui import QFontDatabase
+
+    fonts = files("corewatch") / "assets" / "fonts"
+    for name in theme.FONT_FILES:
+        assert (fonts / name).is_file()
+    for licence in ("ChakraPetch-OFL.txt", "JetBrainsMono-OFL.txt", "IBMPlexSans-OFL.txt"):
+        assert "SIL Open Font License" in (fonts / licence).read_text()
+    assert {theme.DISPLAY_FONT, theme.MONO_FONT, theme.BODY_FONT} <= bundled_fonts
+    assert all(QFontDatabase.hasFamily(name) for name in bundled_fonts)
+    assert QApplication.font().family() == theme.BODY_FONT
+
+
+def test_background_grid_and_corner_mark_geometry() -> None:
+    from PySide6.QtCore import QPointF, QRectF
+
+    assert theme.grid_lines(70, 40, 32) == ([0, 32, 64], [0, 32])
+    assert theme.grid_lines(0, -5) == ([], [])
+    marks = theme.corner_marks(QRectF(0, 0, 100, 50), arm=16)
+    assert marks[0] == (QPointF(0, 0), QPointF(16, 0)) and marks[1] == (QPointF(0, 0), QPointF(0, 16))
+    assert marks[2] == (QPointF(100, 50), QPointF(84, 50)) and marks[3] == (QPointF(100, 50), QPointF(100, 34))
+    tiny = theme.corner_marks(QRectF(0, 0, 10, 6), arm=16)  # never longer than half the card
+    assert tiny[0][1] == QPointF(3, 0) and tiny[1][1] == QPointF(0, 3)
+
+
+@pytest.mark.parametrize("palette", [theme.DARK, theme.LIGHT])
+def test_background_grid_is_a_faint_tint_of_the_accent(palette) -> None:  # type: ignore[no-untyped-def]
+    from PySide6.QtGui import QColor
+
+    grid, accent = QColor(palette.grid), QColor(palette.accent)
+    assert (grid.red(), grid.green(), grid.blue()) == (accent.red(), accent.green(), accent.blue())
+    assert 0 < grid.alpha() <= 16  # Qt reads 8 hex digits as #AARRGGBB
+
+
+def test_background_grid_paints_faint_lines_over_the_window_colour(qapp) -> None:  # type: ignore[no-untyped-def]
+    from PySide6.QtCore import QRectF
+    from PySide6.QtGui import QColor, QPainter
+
+    image = QImage(100, 70, QImage.Format.Format_ARGB32)
+    painter = QPainter(image)
+    theme.paint_grid(painter, QRectF(0, 0, 100, 70), theme.DARK)
+    painter.end()
+    window, line = QColor(theme.DARK.window), image.pixelColor(32, 10)
+    assert image.pixelColor(10, 10) == window  # between lines
+    assert line != window and abs(line.blue() - window.blue()) <= 12  # on a line: barely different
+    assert line.blue() > window.blue() and line.red() <= window.red() + 2  # and tinted cyan, not olive
+
+
+@pytest.mark.parametrize("palette", [theme.DARK, theme.LIGHT])
+def test_cards_paint_accent_corner_marks(qtbot, palette, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    from PySide6.QtGui import QColor
+
+    from corewatch.gui.sensors import CategorySection
+
+    monkeypatch.setattr("corewatch.gui.sensors.current_theme", lambda: palette)
+    section = CategorySection("CPU · i7", collapsed=True)
+    qtbot.addWidget(section)
+    section.resize(300, 120)
+    image = section.grab().toImage()
+    accent, surface = QColor(palette.accent), QColor(palette.surface)
+    assert image.pixelColor(8, 1) == accent  # top-left mark, along the top edge
+    assert image.pixelColor(1, 8) == accent  # and down the left edge
+    assert image.pixelColor(image.width() - 9, image.height() - 2) == accent  # bottom-right mark
+    assert image.pixelColor(image.width() - 9, 1) != accent  # top-right corner has no mark
+    assert image.pixelColor(150, 100) == surface
+
+
+def _contrast(a: str, b: str) -> float:
+    from PySide6.QtGui import QColor
+
+    def luminance(hex_color: str) -> float:
+        c = QColor(hex_color)
+        channels = []
+        for value in (c.redF(), c.greenF(), c.blueF()):
+            channels.append(value / 12.92 if value <= 0.03928 else ((value + 0.055) / 1.055) ** 2.4)
+        return 0.2126 * channels[0] + 0.7152 * channels[1] + 0.0722 * channels[2]
+
+    high, low = sorted((luminance(a), luminance(b)), reverse=True)
+    return (high + 0.05) / (low + 0.05)
+
+
+@pytest.mark.parametrize("palette", [theme.DARK, theme.LIGHT])
+def test_theme_text_is_readable(palette) -> None:  # type: ignore[no-untyped-def]
+    for ground in (palette.window, palette.surface, palette.raised):
+        assert _contrast(palette.text, ground) >= 7
+        assert _contrast(palette.muted, ground) >= 4.5
+    # Status colours draw values as 13 px text, also on a selected row's tint.
+    for color in (palette.accent, palette.warning, palette.critical):
+        for ground in (palette.surface, palette.raised, palette.accent_soft):
+            assert _contrast(color, ground) >= 4.5
+    for color in (palette.text, palette.muted, palette.accent_text):  # a selected row's label and numbers
+        assert _contrast(color, palette.accent_soft) >= 4.5
+    assert _contrast(palette.warning, palette.warning_soft) >= 4.5  # the notes banner and a stalled chip
+    assert _contrast(palette.accent_text, palette.accent_soft) >= 4.5  # the LIVE chip
+
+
+def test_text_scales_with_the_desktops_text_size(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    from PySide6.QtGui import QFont
+
+    def scale(points: float, dpi: float = 96) -> float:
+        desktop = QFont()
+        desktop.setPointSizeF(points)
+        return theme.text_scale_for(theme.desktop_text_pixels(desktop, dpi))
+
+    assert scale(11) == pytest.approx(1.0)
+    assert scale(9) == 1.0  # never smaller than designed
+    assert scale(16.5) == pytest.approx(1.5)
+    assert scale(11, dpi=144) == pytest.approx(1.5)  # X11 enlarges text by font DPI
+    assert scale(30) == theme.MAX_TEXT_SCALE
+    in_pixels = QFont()
+    in_pixels.setPixelSize(22)
+    assert theme.text_scale_for(theme.desktop_text_pixels(in_pixels, 96)) == pytest.approx(1.5)
+    assert theme.text_scale_for(-1) == 1.0  # unknown
+    monkeypatch.setattr(theme, "_text_scale", 1.5)
+    assert theme.px(10) == 15
+    assert theme.font(theme.BODY_FONT, 10).pixelSize() == 15
+    assert "font-size: 15px" in theme.stylesheet(theme.DARK) and "font-size: 10px" not in theme.stylesheet(theme.DARK)
+
+
+def test_tray_number_icons_ignore_the_apps_bundled_font(qapp) -> None:  # type: ignore[no-untyped-def]
+    from PySide6.QtGui import QFont
+
+    before = QApplication.font()
+    try:
+        QApplication.setFont(QFont(theme.BODY_FONT))
+        body = temperature_icon(45.0, Status.OK, False).pixmap(64, 64).toImage()
+        QApplication.setFont(QFont(theme.MONO_FONT))
+        mono = temperature_icon(45.0, Status.OK, False).pixmap(64, 64).toImage()
+    finally:
+        QApplication.setFont(before)
+    assert body == mono  # drawn in the desktop's own font whatever the app's default is
+
+
+def test_host_name_is_short_and_can_be_hidden(qtbot, settings) -> None:  # type: ignore[no-untyped-def]
+    from corewatch.gui.app import short_host
+
+    assert short_host("sophia.lan.example.org") == "sophia" and short_host("box") == "box"
+    window = make_window(qtbot, settings, SCRIPT)
+    assert window.host_action.isChecked() and not window.host_label.isHidden()
+    window.host_action.trigger()
+    assert window.host_label.isHidden() and settings.value("show_host", type=bool) is False
+    reopened = make_window(qtbot, settings, SCRIPT)
+    assert reopened.host_label.isHidden() and not reopened.host_action.isChecked()
+
+
+def test_live_chip_turns_to_waiting_when_readings_stall(qtbot, settings) -> None:  # type: ignore[no-untyped-def]
+    window = make_window(qtbot, settings, SCRIPT)
+    window.refresh()
+    last = window.monitor.last_sample_at
+    assert last is not None
+    window.monitor.clock = lambda: last + window.gap + 1  # type: ignore[method-assign]
+    window._update_live()
+    assert "WAITING" in window.live_chip.text() and window.live_chip.property("stalled") is True
+    window.set_interval(0.5)  # changing the interval doesn't hide a stall
+    assert "WAITING" in window.live_chip.text()
+    window.monitor.clock = lambda: last + 0.1  # type: ignore[method-assign]
+    window._update_live()
+    assert "LIVE" in window.live_chip.text() and window.live_chip.property("stalled") is False
+
+
+def test_narrow_window_keeps_the_settings_button(qtbot, settings) -> None:  # type: ignore[no-untyped-def]
+    window = make_window(qtbot, settings, SCRIPT)
+    window.show()
+    window.resize(1400, 800)
+    qtbot.waitUntil(lambda: window.width() == 1400)
+    assert window.brand_action.isVisible() and window.live_chip_action.isVisible()
+    window.resize(900, 800)
+    qtbot.waitUntil(lambda: window.width() == 900)
+    assert window.brand_action.isVisible() and not window.live_chip_action.isVisible()  # the chip goes first
+    for width in (900, 800, window.minimumSizeHint().width()):
+        window.resize(width, 800)
+        qtbot.waitUntil(lambda width=width: window.width() == width)
+        QApplication.processEvents()
+        assert window.settings_button.isVisible(), width
+    assert not window.live_chip_action.isVisible() and not window.brand_action.isVisible()
+    window.resize(1400, 800)
+    qtbot.waitUntil(lambda: window.width() == 1400)
+    assert window.brand_action.isVisible() and window.live_chip_action.isVisible()  # and back
+
+
+def test_toolbar_hides_blocks_only_when_they_dont_fit(qtbot, settings) -> None:  # type: ignore[no-untyped-def]
+    window = make_window(qtbot, settings, SCRIPT)
+    window.show()
+    toolbar = window.toolbar
+
+    def check(width: int) -> None:
+        QApplication.processEvents()  # the toolbar lays itself out on a posted event
+        assert window.settings_button.isVisible(), width
+        assert toolbar.sizeHint().width() <= toolbar.width(), width
+        # Anything hidden had to be. The chip goes first, so the next step up is the brand alone,
+        # then both.
+        chip, brand = window.live_chip_action, window.brand_action
+        bigger = [brand] if not brand.isVisible() else [brand, chip] if not chip.isVisible() else []
+        if bigger:
+            for action in bigger:
+                action.setVisible(True)
+            QApplication.processEvents()
+            assert toolbar.sizeHint().width() > toolbar.width(), width
+            window._fit_toolbar()
+
+    for width in [*range(window.minimumSizeHint().width(), 1300, 10), *range(1300, 700, -10)]:
+        window.resize(width, 800)
+        qtbot.waitUntil(lambda width=width: window.width() == width)
+        check(width)
+
+
+def test_a_stall_in_a_narrow_window_keeps_the_settings_button(qtbot, settings) -> None:  # type: ignore[no-untyped-def]
+    window = make_window(qtbot, settings, SCRIPT)
+    window.show()
+    window.refresh()
+    window.resize(960, 800)
+    qtbot.waitUntil(lambda: window.width() == 960)
+    last = window.monitor.last_sample_at
+    assert last is not None
+    window.monitor.clock = lambda: last + window.gap + 1  # type: ignore[method-assign]
+    window._update_live()  # WAITING is far wider than LIVE, with no resize to refit the toolbar
+    assert "WAITING" in window.live_chip.text()
+    assert window.settings_button.isVisible()
+    assert window.toolbar.sizeHint().width() <= window.toolbar.width()
+
+
+@pytest.mark.parametrize("fahrenheit", [False, True])
+def test_chart_labels_fit_at_the_largest_text_size(qtbot, settings, monkeypatch, fahrenheit) -> None:  # type: ignore[no-untyped-def]
+    from PySide6.QtGui import QFontMetrics
+
+    monkeypatch.setattr(theme, "_text_scale", theme.MAX_TEXT_SCALE)
+    script = [[temp("t", "CPU", float(v))] for v in (100, 104, 108, 112, 116, 120)]
+    window = make_window(qtbot, settings, script)
+    for _ in range(5):
+        window.refresh()
+    window.set_fahrenheit(fahrenheit)
+    chart = window.detail.chart
+    chart.resize(700, 220)
+    chart.grab()
+    metrics = QFontMetrics(theme.font(theme.MONO_FONT, 11))
+    plot = chart.plot_rect()
+    widest = metrics.horizontalAdvance("248.0 °F" if fahrenheit else "120.0 °C")
+    assert plot.left() - 8 >= widest  # value labels: no leading digit lost
+    assert plot.bottom() + 6 + metrics.height() <= chart.height()  # time labels: not cut at the bottom
+    assert plot.top() >= metrics.height() / 2  # top value label: not cut at the top
+
+
+def test_chart_keeps_its_designed_margins_at_normal_text_size(qtbot, settings) -> None:  # type: ignore[no-untyped-def]
+    script = [[temp("t", "CPU", float(v))] for v in (40, 41, 42)]
+    window = make_window(qtbot, settings, script)
+    for _ in range(2):
+        window.refresh()
+    chart = window.detail.chart
+    chart.resize(700, 220)
+    chart.grab()
+    assert chart.plot_rect().left() == 64
+
+
+# ----- overview: gauges and the core heat map ------------------------------------------------
+
+CPU = "CPU · i7"
+GPU = "GPU · RTX"
+
+
+def _reading(key: str, device: str, label: str, kind: Kind, value: float | None, **extra: float | None):  # type: ignore[no-untyped-def]
+    from corewatch.model import Reading
+
+    return Reading(key, device, label, kind, value, **extra)
+
+
+def machine(cores: dict[str, float] | None = None) -> list:  # type: ignore[type-arg]
+    """One sample of a hybrid Intel CPU and an NVIDIA GPU, as the real sources name things."""
+    cores = cores if cores is not None else {"P-core 0": 41.0, "P-core 1": 56.0, "E-core 0": 38.0, "E-core 1": 72.0}
+    readings = [temp("pkg", CPU, 55.0, label="CPU package", high=80.0, crit=100.0)]
+    readings += [temp(f"core/{name}", CPU, value, label=name) for name, value in cores.items()]
+    readings += [
+        _reading("load", CPU, "CPU load (all cores)", Kind.LOAD, 7.0),
+        _reading("load/p0", CPU, "P-core 0 load", Kind.LOAD, 12.0),
+        _reading("load/p1", CPU, "P-core 1 load", Kind.LOAD, 31.0),
+        _reading("clock/p0", CPU, "P-core 0 clock", Kind.CLOCK, 5300.0),
+        _reading("clock/p1", CPU, "P-core 1 clock", Kind.CLOCK, 2100.0),
+        _reading("pkgw", CPU, "Package power", Kind.POWER, 74.8),
+        _reading("corew", CPU, "Cores power", Kind.POWER, 64.1),
+        temp("gpu", GPU, 33.0, label="GPU temperature", high=94.0, crit=99.0),
+        temp("hot", GPU, 35.9, label="Hotspot temperature"),
+        temp("mem", GPU, 38.0, label="Memory temperature"),
+        _reading("gpuw", GPU, "Power draw", Kind.POWER, 53.9, cap=100.0),
+    ]
+    return readings
+
+
+def _rows(readings):  # type: ignore[no-untyped-def]
+    from corewatch.model import Row
+
+    return [Row(r) for r in readings]
+
+
+def test_core_groups_put_p_cores_first_and_sort_by_number() -> None:
+    from corewatch.gui.overview import core_groups, cores_text, tile_name
+
+    rows = _rows(
+        [
+            temp(f"c{n}", CPU, 40.0, label=label)
+            for n, label in enumerate(["E-core 1", "P-core 10", "P-core 2", "E-core 0"])
+        ]
+        + [temp("pkg", CPU, 50.0, label="CPU package"), temp("x", CPU, 50.0, label="Core voltage")]
+    )
+    groups = core_groups(rows)
+    assert [(name, [r.reading.label for r in members]) for name, members in groups] == [
+        ("P-core", ["P-core 2", "P-core 10"]),  # by number, not as text
+        ("E-core", ["E-core 0", "E-core 1"]),
+    ]
+    assert cores_text(groups) == "2 P-cores · 2 E-cores"
+    assert cores_text(core_groups(_rows([temp("c", CPU, 40.0, label="Core 0")]))) == "1 core"
+    assert cores_text(core_groups(_rows([temp(f"d{n}", CPU, 40.0, label=f"CCD {n}") for n in (1, 2)]))) == "2 CCDs"
+    assert (tile_name("P-core 4"), tile_name("E-core 0"), tile_name("Core 7"), tile_name("CCD 1")) == (
+        "P4",
+        "E0",
+        "C7",
+        "CCD1",
+    )
+    loads = _rows([_reading("l", CPU, "P-core 3 load", Kind.LOAD, 9.0), _reading("a", CPU, "CPU load", Kind.LOAD, 9.0)])
+    assert [r.reading.key for _, g in core_groups(loads, Kind.LOAD, " load") for r in g] == ["l"]
+
+
+def test_heat_bands_and_legend() -> None:
+    from corewatch.gui.overview import heat_band, heat_legend
+
+    assert [heat_band(t) for t in (-5.0, 39.9, 40.0, 49.9, 50.0, 69.9, 70.0, 105.0)] == [0, 0, 1, 1, 2, 2, 3, 3]
+    assert heat_legend(False) == ["under 40 °C", "40–50 °C", "50–70 °C", "70 °C and up"]
+    assert heat_legend(True) == ["under 104 °F", "104–122 °F", "122–158 °F", "158 °F and up"]
+
+
+def test_gauges_summarise_the_machine() -> None:
+    from corewatch.gui.overview import ACCENT, AMBER, HEAT, gauge_specs
+
+    specs = gauge_specs(_rows(machine()), fahrenheit=False)
+    assert [s.title for s in specs] == ["CPU temperature", "GPU temperature", "CPU load", "CPU + GPU power"]
+    cpu, gpu, load, power = specs
+    assert (cpu.key, cpu.value, cpu.unit, cpu.caption) == ("pkg", "55.0", "°C", "0–100 °C")
+    assert cpu.details == ("hottest E1 · 72.0 °C",) and cpu.arcs == ((0.55, HEAT),) and cpu.celsius == 55.0
+    assert (gpu.key, gpu.value) == ("gpu", "33.0")
+    assert gpu.details == ("hotspot 35.9 °C", "memory 38.0 °C")
+    assert (load.key, load.value, load.unit) == ("load", "7", "%")
+    assert load.details == ("busiest P1 · 31 %", "fastest 5,300 MHz") and load.arcs == ((0.07, ACCENT),)
+    assert power.key == "pkgw" and (power.value, power.unit) == ("128.7", "W")  # package power, not cores power
+    assert power.details == ("CPU 74.8 W", "GPU 53.9 W")
+    assert [role for _, role in power.arcs] == [AMBER, ACCENT]
+    assert sum(fraction for fraction, _ in power.arcs) == pytest.approx(1.0)
+    assert power.arcs[0][0] == pytest.approx(74.8 / 128.7)
+
+
+def test_gauges_follow_fahrenheit_and_leave_out_what_is_missing() -> None:
+    from corewatch.gui.overview import gauge_specs
+
+    hot = gauge_specs(_rows(machine()), fahrenheit=True)[0]
+    assert (hot.value, hot.unit, hot.caption) == ("131.0", "°F", "32–212 °F")
+    assert hot.arcs[0][0] == pytest.approx(0.55)  # the ring is the same temperature either way
+    assert hot.details == ("hottest E1 · 161.6 °F",)
+
+    gpu_only = [r for r in machine() if r.device == GPU]
+    specs = gauge_specs(_rows(gpu_only), fahrenheit=False)
+    assert [s.title for s in specs] == ["GPU temperature", "GPU power"]
+    assert specs[1].caption == "of 100 W" and specs[1].arcs[0][0] == pytest.approx(0.539)
+    assert specs[1].details == ("limit 100.0 W",)
+
+    no_cores = [r for r in machine(cores={}) if r.device == CPU and r.kind is Kind.TEMPERATURE]
+    (only,) = gauge_specs(_rows(no_cores), fahrenheit=False)
+    assert only.details == ("high 80.0 °C · crit 100.0 °C",)  # no cores to name: the limits instead
+    unread = gauge_specs(_rows([temp("pkg", CPU, None, label="CPU package")]), fahrenheit=False)
+    assert [(s.title, s.value, s.unit) for s in unread] == [("CPU temperature", "—", "")]  # kept, not dropped
+    assert gauge_specs([], fahrenheit=False) == []
+
+
+def test_overview_shows_gauges_and_a_heat_map_in_the_cpu_card(qtbot, settings) -> None:  # type: ignore[no-untyped-def]
+    window = make_window(qtbot, settings, [machine()])
+    window.show()
+    window.resize(1300, 900)
+    window.refresh()
+    QApplication.processEvents()
+    assert [g.spec.title for g in window.gauges.gauges if g.spec] == [
+        "CPU temperature",
+        "GPU temperature",
+        "CPU load",
+        "CPU + GPU power",
+    ]
+    assert window.gauges.isVisible()
+    cpu_card, gpu_card = window.sections[CPU], window.sections[GPU]
+    heat_map = cpu_card.view.heat_map
+    assert heat_map.isVisible() and heat_map.core_count() == 4
+    assert gpu_card.view is None  # a GPU card is its list
+    assert heat_map.height() == heat_map.heightForWidth(heat_map.width())
+
+    window.gauges.gauges[1].clicked.emit("gpu")  # what a click on the GPU gauge sends
+    assert window.selected_key == "gpu"
+    qtbot.mouseClick(window.gauges.gauges[2], Qt.MouseButton.LeftButton)
+    assert window.selected_key == "load"
+
+    tile = next(t for t in heat_map._layout_tiles() if t.name == "E1")
+    qtbot.mouseClick(heat_map, Qt.MouseButton.LeftButton, pos=tile.shape.boundingRect().center().toPoint())
+    assert window.selected_key == "core/E-core 1" and heat_map.selected_key == "core/E-core 1"
+    window.grab()  # paints gauges and tiles, including the selected one
+
+
+def test_overview_steps_aside_while_filtering_and_when_folded(qtbot, settings) -> None:  # type: ignore[no-untyped-def]
+    window = make_window(qtbot, settings, [machine()])
+    window.show()
+    window.refresh()
+    heat_map = window.sections[CPU].view.heat_map
+    window.filter.setText("P-core")
+    assert not window.gauges.isVisible() and not heat_map.isVisible()
+    window.filter.setText("")
+    assert window.gauges.isVisible() and heat_map.isVisible()
+    window.sections[CPU].set_collapsed(True, user=True)
+    assert not heat_map.isVisible()
+    window.sections[CPU].set_collapsed(False, user=True)
+    assert heat_map.isVisible()
+
+
+def test_heat_map_needs_two_cores_and_ignores_renames(qtbot, settings) -> None:  # type: ignore[no-untyped-def]
+    window = make_window(qtbot, settings, [machine(cores={"Core 0": 45.0})])
+    window.show()
+    window.refresh()
+    assert not window.sections[CPU].view.heat_map.isVisible()  # one core is no map
+
+    other = make_window(qtbot, settings, [machine()])
+    other.show()
+    other.rename_sensor("core/P-core 1", "Hot one")
+    other.refresh()
+    heat_map = other.sections[CPU].view.heat_map
+    assert heat_map.core_count() == 4  # still found by its original name
+    tiles = {t.name: t for t in heat_map._layout_tiles()}
+    assert tiles["P1"].label == "Hot one"  # the tooltip uses the name you gave it
+
+
+def test_heat_map_wraps_into_a_honeycomb_when_narrow(qtbot) -> None:  # type: ignore[no-untyped-def]
+    from corewatch.gui.overview import CoreHeatMap, core_groups
+
+    rows = _rows([temp(f"c{n}", CPU, 40.0 + n, label=f"Core {n}") for n in range(12)])
+    heat_map = CoreHeatMap()
+    qtbot.addWidget(heat_map)
+    heat_map.set_cores(core_groups(rows), fahrenheit=False)
+    tile_w = theme.px(CoreHeatMap.TILE_W)
+    wide, narrow = heat_map.heightForWidth(2000), heat_map.heightForWidth(tile_w * 5)
+    assert narrow > wide
+    heat_map.resize(tile_w * 5, narrow)
+    tiles = heat_map._layout_tiles()
+    lines = sorted({t.shape.boundingRect().top() for t in tiles})
+    assert len(lines) == 3  # 12 cores, 4 to a line
+    first, second = (
+        sorted(t.shape.boundingRect().left() for t in tiles if t.shape.boundingRect().top() == y)[0] for y in lines[:2]
+    )
+    assert second > first  # every other line shifted to nest
+    assert all(t.shape.boundingRect().right() <= heat_map.width() for t in tiles)
+    shapes = [t.shape.boundingRect() for t in tiles]
+    assert not any(a.intersects(b) and a != b and a.top() == b.top() for a in shapes for b in shapes)
+
+
+def test_gauge_strip_balances_its_lines_and_never_squeezes_a_gauge(qtbot) -> None:  # type: ignore[no-untyped-def]
+    from PySide6.QtWidgets import QVBoxLayout, QWidget
+
+    from corewatch.gui.overview import GaugeStrip, gauge_specs
+
+    host = QWidget()  # the strip lives in a layout, as in the window, so resizing reflows it
+    qtbot.addWidget(host)
+    QVBoxLayout(host).setContentsMargins(0, 0, 0, 0)
+    strip = GaugeStrip()
+    host.layout().addWidget(strip)
+    strip.set_specs(gauge_specs(_rows(machine()), fahrenheit=False))
+    host.show()
+    need = max(g.needed_width() for g in strip.gauges)
+    spacing = strip.grid.spacing()
+
+    def columns_at(width: int) -> list[tuple[int, int]]:
+        host.resize(width, 600)
+        qtbot.waitUntil(lambda: strip.width() == width)
+        QApplication.processEvents()
+        for gauge in strip.gauges:  # every gauge gets the room its title and value need
+            assert gauge.width() >= gauge.needed_width(), (width, gauge.spec and gauge.spec.title)
+        return [strip.grid.getItemPosition(strip.grid.indexOf(g))[:2] for g in strip.gauges]
+
+    assert columns_at(need * 4 + spacing * 3) == [(0, 0), (0, 1), (0, 2), (0, 3)]
+    assert columns_at(need * 4 + spacing * 3 - 1) == [(0, 0), (0, 1), (1, 0), (1, 1)]  # room for 3: 2 x 2
+    assert columns_at(need * 2 + spacing) == [(0, 0), (0, 1), (1, 0), (1, 1)]
+    assert columns_at(need * 2 + spacing - 1) == [(0, 0), (1, 0), (2, 0), (3, 0)]
+    three = gauge_specs(_rows([r for r in machine() if r.kind is not Kind.POWER]), fahrenheit=False)
+    strip.set_specs(three)
+    assert len(strip.gauges) == 3
+    assert columns_at(need * 4 + spacing * 3) == [(0, 0), (0, 1), (0, 2)]
+
+
+def test_gauge_width_holds_a_long_value_and_its_unit(qtbot) -> None:  # type: ignore[no-untyped-def]
+    from PySide6.QtGui import QFontMetrics
+
+    from corewatch.gui.overview import Gauge, GaugeSpec
+
+    gauge = Gauge()
+    qtbot.addWidget(gauge)
+    short = GaugeSpec("CPU load", "k", "7", "%", "", (), ())
+    gauge.set_spec(short)
+    steady = gauge.needed_width()
+    gauge.set_spec(GaugeSpec("CPU load", "k", "100", "%", "", (), ()))
+    assert gauge.needed_width() == steady  # a reading gaining digits doesn't reflow the strip
+    _, value_font, unit_font, _ = Gauge._fonts()
+    gauge.set_spec(GaugeSpec("CPU + GPU power", "k", "1,234.5", "W", "", (), ()))
+    room = gauge.needed_width() - theme.px(18 + Gauge.RING + 18 + 14)
+    assert room >= QFontMetrics(value_font).horizontalAdvance("1,234.5") + QFontMetrics(unit_font).horizontalAdvance(
+        "W"
+    )
+
+
+def test_power_never_counts_integrated_graphics_twice() -> None:
+    from corewatch.gui.overview import gauge_specs, primary_gpu
+
+    def power_of(readings):  # type: ignore[no-untyped-def]
+        return next(s for s in gauge_specs(_rows(readings), fahrenheit=False) if s.title.endswith("power"))
+
+    package = _reading("rapl/0", CPU, "Package power", Kind.POWER, 20.0)
+    igpu = "GPU · Intel UHD Graphics 770"
+    uncore = _reading("rapl/0:1", igpu, "Power draw", Kind.POWER, 5.0, integrated=True)
+    igpu_clock = _reading("ig/clock", igpu, "Graphics clock", Kind.CLOCK, 300.0, integrated=True)
+    spec = power_of([package, uncore, igpu_clock])
+    assert (spec.title, spec.value, spec.key) == ("CPU power", "20.0", "rapl/0")  # the uncore is inside it
+
+    apu = "GPU · AMD Rembrandt"
+    ppt = _reading("hw/apu/power1", apu, "Power draw (CPU and GPU)", Kind.POWER, 28.0, integrated=True)
+    edge = temp("hw/apu/temp1", apu, 45.0, label="GPU temperature")
+    edge = _reading(edge.key, apu, edge.label, Kind.TEMPERATURE, 45.0, integrated=True)
+    spec = power_of([package, ppt, edge])
+    assert (spec.title, spec.value) == ("CPU power", "20.0")  # not 48 W
+    spec = power_of([ppt, edge])  # no RAPL: the APU's whole-chip figure is the CPU's power
+    assert (spec.title, spec.value, spec.details) == ("CPU power", "28.0", ("CPU and integrated graphics",))
+
+    rtx = "GPU · NVIDIA GeForce RTX 4060 Laptop GPU"
+    laptop = [
+        ppt,
+        edge,
+        temp("nv/temp", rtx, 78.0, label="GPU temperature"),
+        _reading("nv/power", rtx, "Power draw", Kind.POWER, 90.0, cap=115.0),
+    ]
+    assert primary_gpu(_rows(laptop)) == rtx  # the card of its own, though the APU comes first
+    specs = {s.title: s for s in gauge_specs(_rows(laptop), fahrenheit=False)}
+    assert (specs["GPU temperature"].key, specs["GPU temperature"].value) == ("nv/temp", "78.0")
+    spec = specs["CPU + GPU power"]
+    assert (spec.value, spec.details) == ("118.0", ("CPU 28.0 W", "GPU 90.0 W"))
+
+
+def test_two_cards_take_temperature_and_power_from_the_same_one() -> None:
+    from corewatch.gui.overview import gauge_specs
+
+    arc, rtx = "GPU · Intel Arc A770", "GPU · NVIDIA GeForce RTX 4070"
+    readings = [
+        _reading("arc/power", arc, "Power draw", Kind.POWER, 40.0, cap=190.0),  # Arc first, no temperature
+        temp("nv/temp", rtx, 50.0, label="GPU temperature"),
+        _reading("nv/power", rtx, "Power draw", Kind.POWER, 120.0, cap=200.0),
+    ]
+    specs = {s.title: s for s in gauge_specs(_rows(readings), fahrenheit=False)}
+    assert specs["GPU temperature"].key == "nv/temp"
+    assert (specs["GPU power"].key, specs["GPU power"].caption) == ("nv/power", "of 200 W")
+
+
+def test_power_gauge_without_a_cap_or_with_a_reading_missing() -> None:
+    from corewatch.gui.overview import power_gauge
+
+    package = _reading("rapl/0", CPU, "Package power", Kind.POWER, 65.0)
+    alone = power_gauge(_rows([package]), None, fahrenheit=False)
+    assert alone is not None and (alone.title, alone.caption, alone.arcs, alone.details) == ("CPU power", "", (), ())
+
+    asleep = _reading("nv/power", GPU, "Power draw", Kind.POWER, None, cap=100.0)  # a sleeping laptop GPU
+    spec = power_gauge(_rows([package, asleep]), GPU, fahrenheit=False)
+    assert spec is not None and spec.title == "CPU + GPU power"  # stays put rather than flipping titles
+    assert (spec.value, spec.details, spec.arcs) == ("65.0", ("CPU 65.0 W", "GPU —"), ())  # the CPU's still known
+    assert power_gauge(_rows([]), None, fahrenheit=False) is None
+
+
+def test_heat_map_tooltip_keyboard_and_an_unread_core(qtbot) -> None:  # type: ignore[no-untyped-def]
+    from PySide6.QtGui import QHelpEvent
+    from PySide6.QtWidgets import QToolTip
+
+    from corewatch.gui.overview import CoreHeatMap, core_groups
+
+    rows = _rows(
+        [
+            temp("c0", CPU, 45.0, label="Core 0"),
+            temp("c1", CPU, None, label="Core 1"),
+            temp("c2", CPU, 71.0, label="Core 2"),
+        ]
+    )
+    heat_map = CoreHeatMap()
+    qtbot.addWidget(heat_map)
+    heat_map.set_cores(core_groups(rows), fahrenheit=False, labels={"c1": "Under the cooler"})
+    heat_map.resize(600, heat_map.heightForWidth(600))
+    heat_map.show()
+    assert heat_map.accessibleName() == "Core heat map"
+    assert heat_map.accessibleDescription() == "C0 45.0 °C, C1 —, C2 71.0 °C"
+    heat_map.grab()  # paints the unread core as "—" without failing
+
+    tiles = heat_map._layout_tiles()
+    center = tiles[1].shape.boundingRect().center().toPoint()
+    QApplication.sendEvent(heat_map, QHelpEvent(QEvent.Type.ToolTip, center, heat_map.mapToGlobal(center)))
+    assert QToolTip.text() == "Under the cooler: —"
+
+    chosen = []
+    heat_map.selected.connect(chosen.append)
+    heat_map.setFocus()
+    for key in (Qt.Key.Key_Right, Qt.Key.Key_Right, Qt.Key.Key_Right, Qt.Key.Key_Return):
+        qtbot.keyClick(heat_map, key)
+    assert chosen == ["c2"]  # stops at the last core
+    qtbot.keyClick(heat_map, Qt.Key.Key_Home)
+    qtbot.keyClick(heat_map, Qt.Key.Key_Space)
+    assert chosen == ["c2", "c0"]
+    heat_map.grab()  # paints the keyboard focus ring
+
+
+def test_gauges_open_with_the_keyboard(qtbot, settings) -> None:  # type: ignore[no-untyped-def]
+    window = make_window(qtbot, settings, [machine()])
+    window.show()
+    window.refresh()
+    gauge = window.gauges.gauges[1]
+    gauge.setFocus()
+    qtbot.keyClick(gauge, Qt.Key.Key_Return)
+    assert window.selected_key == "gpu"
+    window.grab()  # paints the focused gauge
+
+
+def test_heat_map_relayouts_only_when_its_cores_change(qtbot, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    from corewatch.gui.overview import CoreHeatMap, core_groups
+
+    heat_map = CoreHeatMap()
+    qtbot.addWidget(heat_map)
+    calls = []
+    monkeypatch.setattr(heat_map, "updateGeometry", lambda: calls.append(1))
+    first = _rows([temp(f"c{n}", CPU, 40.0, label=f"Core {n}") for n in range(4)])
+    heat_map.set_cores(core_groups(first), fahrenheit=False)
+    later = _rows([temp(f"c{n}", CPU, 60.0, label=f"Core {n}") for n in range(4)])  # new readings, same cores
+    heat_map.set_cores(core_groups(later), fahrenheit=True)
+    assert len(calls) == 1
+    heat_map.set_cores(core_groups(later[:3]), fahrenheit=True)  # a core went away
+    assert len(calls) == 2
+
+
+@pytest.mark.parametrize("palette", [theme.DARK, theme.LIGHT])
+def test_heat_colours_are_readable(palette) -> None:  # type: ignore[no-untyped-def]
+    assert len(palette.heat) == 4
+    for edge, tint, name in palette.heat:
+        assert _contrast(name, tint) >= 4.5  # the core's name
+        assert _contrast(palette.text, tint) >= 4.5  # its temperature
+        assert _contrast(name, palette.surface) >= 4.5  # a gauge's value, coloured by heat
+        assert _contrast(edge, palette.surface) >= 3  # the outline and the ring
+
+
+def test_gauges_fit_the_narrowest_window(qtbot, settings) -> None:  # type: ignore[no-untyped-def]
+    window = make_window(qtbot, settings, [machine()])
+    window.show()
+    window.refresh()
+    width = window.minimumSizeHint().width()
+    window.resize(width, 800)
+    qtbot.waitUntil(lambda: window.width() == width)
+    for _ in range(3):
+        QApplication.processEvents()
+    viewport = window.list_area.viewport().width()
+    assert window.gauges.width() <= viewport  # nothing clipped off the right
+    assert all(g.width() >= g.needed_width() for g in window.gauges.gauges)
+
+
+def test_power_adds_zenpowers_core_and_soc_rails() -> None:
+    from corewatch.gui.overview import power_gauge
+
+    core = _reading("zp/core", CPU, "Core power", Kind.POWER, 20.0)
+    soc = _reading("zp/soc", CPU, "SoC power", Kind.POWER, 8.0)
+    spec = power_gauge(_rows([core, soc]), None, fahrenheit=False)
+    assert spec is not None and (spec.title, spec.value, spec.key) == ("CPU power", "28.0", "zp/core")
+    unread = power_gauge(_rows([core, _reading("zp/soc", CPU, "SoC power", Kind.POWER, None)]), None, False)
+    assert unread is not None and unread.value == "—"  # half a sum would read low
+    package = _reading("rapl/0", CPU, "Package power", Kind.POWER, 31.0)
+    spec = power_gauge(_rows([core, soc, package]), None, fahrenheit=False)
+    assert spec is not None and (spec.value, spec.key) == ("31.0", "rapl/0")  # RAPL's package already has both
+
+
+def test_heat_map_up_and_down_go_to_the_core_above_or_below(qtbot) -> None:  # type: ignore[no-untyped-def]
+    from corewatch.gui.overview import CoreHeatMap, core_groups
+
+    rows = _rows(
+        [temp(f"p{n}", CPU, 40.0, label=f"P-core {n}") for n in range(3)]
+        + [temp(f"e{n}", CPU, 40.0, label=f"E-core {n}") for n in range(8)]
+    )
+    heat_map = CoreHeatMap()
+    qtbot.addWidget(heat_map)
+    heat_map.set_cores(core_groups(rows), fahrenheit=False)
+    heat_map.resize(2000, heat_map.heightForWidth(2000))
+    heat_map.show()
+    names = [t.name for t in heat_map._layout_tiles()]
+
+    def press(*keys: Qt.Key) -> str:
+        for key in keys:
+            qtbot.keyClick(heat_map, key)
+        return names[heat_map.focus_index]
+
+    heat_map.focus_index = names.index("P2")
+    assert press(Qt.Key.Key_Down) == "E2"  # the nearer of the two nested below, leaning right
+    assert press(Qt.Key.Key_Up) == "P2"  # and back
+    heat_map.focus_index = names.index("E7")
+    assert press(Qt.Key.Key_Up) == "P2"  # the nearest across, not a line's length back through the list
+    assert press(Qt.Key.Key_Up) == "P2"  # nowhere further up
+    heat_map.focus_index = names.index("E5")
+    assert press(Qt.Key.Key_Down) == "E5"  # nowhere further down
+
+
+def test_focus_rings_show_for_the_keyboard_not_for_clicks(qtbot, settings) -> None:  # type: ignore[no-untyped-def]
+    window = make_window(qtbot, settings, [machine()])
+    with qtbot.waitActive(window):
+        window.show()
+        window.activateWindow()
+    window.refresh()
+    gauge = window.gauges.gauges[0]
+    qtbot.mouseClick(gauge, Qt.MouseButton.LeftButton)
+    assert gauge.hasFocus() and not gauge.keyboard_focus
+    gauge.clearFocus()
+    gauge.setFocus(Qt.FocusReason.TabFocusReason)
+    assert gauge.keyboard_focus
+    window.grab()
+
+    heat_map = window.sections[CPU].view.heat_map
+    tile = heat_map._layout_tiles()[0]
+    qtbot.mouseClick(heat_map, Qt.MouseButton.LeftButton, pos=tile.shape.boundingRect().center().toPoint())
+    assert heat_map.hasFocus() and not heat_map.keyboard_focus
+    qtbot.keyClick(heat_map, Qt.Key.Key_Right)  # arrows after a click: now it's the keyboard's turn
+    assert heat_map.keyboard_focus
+    window.grab()
+
+
+# ----- device cards: each opens on its own view, the full list on demand ---------------------
+
+
+def _view_data(rows, everything=None, labels=None, fahrenheit=False):  # type: ignore[no-untyped-def]
+    from corewatch.gui.cards import ViewData
+
+    return ViewData(rows, everything if everything is not None else rows, labels or {}, fahrenheit)
+
+
+def _gathered(key: str, origin: str, label: str, kind: Kind, value: float | None, **extra):  # type: ignore[no-untyped-def]
+    from corewatch.model import Reading
+
+    device = "Storage" if origin.startswith(("NVMe", "Disk")) else "Fans"
+    return Reading(key, device, label, kind, value, origin=origin, **extra)
+
+
+def test_fan_view_pairs_each_fan_with_how_hard_it_is_driven() -> None:
+    from corewatch.gui.cards import FanView
+    from corewatch.model import Row, Stats
+
+    rows = [
+        Row(_gathered("mb", "Motherboard · Z790", "Fan 2", Kind.FAN, 1500.0)),
+        Row(_gathered("mb-pwm", "Motherboard · Z790", "Fan control 2", Kind.FAN_DUTY, 58.0, companion="mb")),
+        # Two graphics cards, both with a "Fan 1": the Fans card names them apart.
+        Row(_gathered("rtx", "GPU · RTX 4070", "GPU fan 1 (RTX 4070)", Kind.FAN, 2320.0)),
+        Row(_gathered("amd-pct", "GPU · AMD", "GPU fan 1 speed (AMD)", Kind.FAN_DUTY, 40.0)),
+        Row(_gathered("rtx-pct", "GPU · RTX 4070", "GPU fan 1 speed (RTX 4070)", Kind.FAN_DUTY, 73.0)),
+        Row(_gathered("amd", "GPU · AMD", "GPU fan 1 (AMD)", Kind.FAN, 900.0)),
+        Row(_gathered("free", "Motherboard · Z790", "Fan 3", Kind.FAN, 900.0), Stats(maximum=1800.0)),
+        Row(_gathered("still", "Motherboard · Z790", "Fan 4", Kind.FAN, 0.0)),
+        Row(_gathered("unread", "Motherboard · Z790", "Fan 5", Kind.FAN, None)),
+        # A driver that reports how hard a fan is driven but not its speed.
+        Row(_gathered("only-pct", "GPU · GTX 1080", "GPU fan 2 speed", Kind.FAN_DUTY, 35.0)),
+        # A pump header: its control names a fan input the board doesn't have.
+        Row(_gathered("pump", "Motherboard · Z790", "Fan control 6", Kind.FAN_DUTY, 100.0, companion="gone")),
+    ]
+    view = FanView()
+    view.set_data(_view_data(rows, labels={"mb": "Front intake"}))
+    got = {i.key: (i.name, i.rpm, i.unit, i.share, i.where, i.spinning, i.driven) for i in view.items}  # type: ignore[attr-defined]
+    assert list(got) == ["mb", "rtx", "amd", "free", "still", "unread", "only-pct", "pump"]  # in order
+    assert got == {
+        "mb": ("Front intake", "1,500", "RPM", 0.58, "board header · set to 58 %", True, True),  # renamed
+        "rtx": ("GPU fan 1 (RTX 4070)", "2,320", "RPM", 0.73, "RTX 4070 · set to 73 %", True, True),
+        "amd": ("GPU fan 1 (AMD)", "900", "RPM", 0.40, "AMD · set to 40 %", True, True),
+        "free": ("Fan 3", "900", "RPM", 0.5, "board header", True, False),  # against its own fastest
+        "still": ("Fan 4", "0", "RPM", 0.0, "board header", False, False),
+        "unread": ("Fan 5", "—", "RPM", None, "board header", False, False),
+        "only-pct": ("GPU fan 2 speed", "35", "%", 0.35, "GTX 1080", True, True),
+        "pump": ("Fan control 6", "100", "%", 1.0, "board header", True, True),
+    }
+    assert view.items[0].tooltip == "Front intake: 1,500 RPM"
+    assert view.accessibleName() == "Fans"
+    assert view.accessibleDescription().startswith("Front intake; GPU fan 1 (RTX 4070); GPU fan 1 (AMD); Fan 3")
+    before = view.accessibleDescription()
+    view.set_data(
+        _view_data([Row(replace(r.reading, value=1.0), r.stats) for r in rows], labels={"mb": "Front intake"})
+    )
+    assert view.accessibleDescription() == before  # the readings changed, the description didn't
+
+
+def test_storage_view_has_a_line_per_drive() -> None:
+    from corewatch.gui.cards import StorageView
+    from corewatch.model import Row, Status
+
+    samsung = "NVMe nvme0 · Samsung SSD 980"
+    rows = [
+        Row(_gathered("sata", "Disk · ST4000", "ST4000 Temperature", Kind.TEMPERATURE, 61.0, high=60.0)),
+        Row(_gathered("n10", "NVMe nvme10 · WD", "nvme10 Composite", Kind.TEMPERATURE, 30.0)),
+        Row(_gathered("n10s1", "NVMe nvme10 · WD", "nvme10 Sensor 1", Kind.TEMPERATURE, 29.0)),  # cooler
+        Row(_gathered("n0", samsung, "nvme0 Composite", Kind.TEMPERATURE, 34.0, high=81.8, crit=84.8)),
+        Row(_gathered("n0s1", samsung, "nvme0 Sensor 1", Kind.TEMPERATURE, 38.9)),
+        Row(_gathered("n0s2", samsung, "nvme0 Sensor 2", Kind.TEMPERATURE, 72.0, high=70.0)),
+        Row(_gathered("n2", "NVMe nvme2 · Kingston", "nvme2 Composite", Kind.TEMPERATURE, None)),
+        Row(_gathered("n2s1", "NVMe nvme2 · Kingston", "nvme2 Sensor 1", Kind.TEMPERATURE, 41.0)),
+    ]
+    view = StorageView()
+    view.set_data(_view_data(rows))
+    got = [(i.key, i.model, i.name, i.temperature, i.high, i.crit, i.hottest, i.status) for i in view.items]  # type: ignore[attr-defined]
+    assert got == [  # by name, numbers as numbers
+        ("n0", "Samsung SSD 980", "nvme0", 34.0, 81.8, 84.8, 72.0, Status.WARNING),  # its hot sensor shows
+        ("n2", "Kingston", "nvme2", None, None, None, 41.0, Status.OK),  # unread bar: the other still shows
+        ("n10", "WD", "nvme10", 30.0, None, None, None, Status.OK),  # a cooler sensor isn't worth a mention
+        ("sata", "ST4000", "", 61.0, 60.0, None, None, Status.WARNING),  # a model is its own short name
+    ]
+    view.set_data(_view_data(rows, fahrenheit=True))
+    assert view.items[0].tooltip == "Samsung SSD 980 (nvme0): 93.2 °F"
+
+
+def test_board_view_shows_its_named_voltage_rails() -> None:
+    from corewatch.gui.cards import RailView
+
+    board = "Motherboard · Z790"
+    rows = _rows(
+        [
+            _reading("vcore", board, "CPU core (Vcore)", Kind.VOLTAGE, 1.152),
+            _reading("in3", board, "in3", Kind.VOLTAGE, 0.9),
+            _reading("v4", board, "Voltage 4", Kind.VOLTAGE, 1.0),
+            _reading("v12", board, "+12V", Kind.VOLTAGE, 12.0),
+            _reading("vin", board, "Vin 2", Kind.VOLTAGE, None),
+            temp("t", board, 30.0, label="Temperature 1"),
+        ]
+    )
+    view = RailView()
+    view.set_data(_view_data(rows, labels={"v12": "12 V rail"}))
+    assert [(t.title, t.value, t.unit) for t in view.items] == [  # type: ignore[attr-defined]
+        ("CPU core (Vcore)", "1.152", "V"),
+        ("12 V rail", "12.000", "V"),
+        ("Vin 2", "—", ""),
+    ]
+    view.set_data(_view_data(rows[1:3]))
+    assert view.is_empty()  # only unnamed rails: the card shows its list instead
+
+
+def test_cpu_tiles_show_the_headline_numbers() -> None:
+    from corewatch.gui.cards import CpuTileView
+
+    cpu_rows = [r for r in _rows(machine()) if r.reading.device == CPU]
+    board_vcore = _rows([_reading("vcore", "Motherboard · Z790", "CPU core (Vcore)", Kind.VOLTAGE, 1.136)])
+    view = CpuTileView()
+    view.set_data(_view_data(cpu_rows, everything=cpu_rows + board_vcore))
+    assert [(t.title, t.value, t.unit, t.key) for t in view.items] == [  # type: ignore[attr-defined]
+        ("Package power", "74.8", "W", "pkgw"),
+        ("Cores power", "64.1", "W", "corew"),
+        ("Fastest clock", "5,300", "MHz", "clock/p0"),
+        ("Vcore", "1.136", "V", "vcore"),  # from the board's chip
+        ("Load", "7", "%", "load"),
+        ("Hottest", "E1 72.0", "°C", "core/E-core 1"),
+    ]
+    zen = _rows(
+        [_reading("zv", CPU, "Core voltage", Kind.VOLTAGE, 1.2), _reading("x", CPU, "CPU load", Kind.LOAD, 3.0)]
+    )
+    view.set_data(_view_data(zen, fahrenheit=True))
+    assert [(t.title, t.value) for t in view.items] == [("Vcore", "1.200"), ("Load", "3")]  # type: ignore[attr-defined]
+    hot = _rows([temp("c0", CPU, 40.0, label="Core 0"), temp("c1", CPU, 50.0, label="Core 1")])
+    view.set_data(_view_data(hot, fahrenheit=True))
+    assert [(t.title, t.value, t.unit) for t in view.items] == [("Hottest", "C1 122.0", "°F")]  # type: ignore[attr-defined]
+
+
+def test_network_view_shows_traffic_and_its_temperatures() -> None:
+    from corewatch.gui.cards import NetworkView
+
+    nic = "Network · enp7s0"
+    rows = _rows(
+        [
+            _reading("rx", nic, "Download", Kind.THROUGHPUT, 12_300.0),
+            _reading("tx", nic, "Upload", Kind.THROUGHPUT, 0.0),
+            temp("phy", nic, 50.0, label="PHY Temperature"),
+            temp("mac", nic, 51.0, label="MAC temperature"),
+            _reading("other", nic, "Link use", Kind.LOAD, 4.0),
+        ]
+    )
+    view = NetworkView()
+    view.set_data(_view_data(rows, labels={"tx": "Sent"}))
+    assert [(i.key, i.title, i.value) for i in view.items] == [  # type: ignore[attr-defined]
+        ("rx", "Download", "12.3 KB/s"),
+        ("tx", "Sent", "0 B/s"),
+    ]
+    assert view.temperatures() == "PHY 50.0 °C · MAC 51.0 °C"
+    with_footer = view.heightForWidth(400)
+    view.set_data(_view_data(rows[:2] + rows[4:]))
+    assert view.temperatures() == "" and view.footer_height() == 0
+    assert view.heightForWidth(400) < with_footer
+
+
+def full_machine() -> list:  # type: ignore[type-arg]
+    """``machine()`` plus the cards that open on a view of their own: fans, drives, a board."""
+    from corewatch.model import Reading
+
+    board = "Motherboard · Z790"
+    return [
+        *machine(),
+        Reading("fan2", board, "Fan 2", Kind.FAN, 1500.0),
+        Reading("fan7", board, "Fan 7", Kind.FAN, 3000.0),
+        Reading("vcore", board, "CPU core (Vcore)", Kind.VOLTAGE, 1.136),
+        Reading("v12", board, "+12V", Kind.VOLTAGE, 12.0),
+        temp("n0", "NVMe nvme0 · Samsung SSD 980", 34.0, label="Composite", high=81.8),
+        temp("n1", "NVMe nvme1 · Samsung SSD 970", 30.0, label="Composite", high=84.8),
+        temp("acpi", "Motherboard · ACPI thermal zone", 27.8, label="Temperature 1"),
+    ]
+
+
+def test_cards_open_on_their_view_with_the_full_list_on_demand(qtbot, settings) -> None:  # type: ignore[no-untyped-def]
+    window = make_window(qtbot, settings, [full_machine()])
+    window.resize(1300, 900)
+    window.show()
+    window.refresh()
+    assert list(window.sections) == [
+        CPU,
+        GPU,
+        "Fans",
+        "Storage",
+        "Motherboard · Z790",
+        "Motherboard · ACPI thermal zone",
+    ]
+    cpu, gpu, acpi = window.sections[CPU], window.sections[GPU], window.sections["Motherboard · ACPI thermal zone"]
+    assert cpu.view.isVisible() and not cpu.grid.isVisible() and cpu.table_button.isVisible()
+    assert gpu.view is None and gpu.grid.isVisible() and not gpu.table_button.isVisible()
+    assert acpi.view.is_empty() and acpi.grid.isVisible() and not acpi.table_button.isVisible()  # no named rails
+    assert [i.key for i in window.sections["Storage"].view.items] == ["n0", "n1"]
+
+    cpu.table_button.click()
+    assert cpu.view.isVisible() and cpu.grid.isVisible() and cpu.table_button.isChecked()
+    assert json.loads(settings.value("expanded_cards")) == [CPU]
+
+    window.filter.setText("package")  # while filtering, a card lists what matches
+    assert not cpu.view.isVisible() and cpu.grid.isVisible() and not cpu.table_button.isVisible()
+    window.filter.clear()
+    assert cpu.view.isVisible() and cpu.table_button.isVisible()
+
+    again = make_window(qtbot, settings, [full_machine()])
+    again.show()
+    again.refresh()
+    assert again.sections[CPU].grid.isVisible() and again.sections[CPU].table_button.isChecked()
+    assert not again.sections["Fans"].grid.isVisible()
+    again.sections[CPU].table_button.click()
+    assert not again.sections[CPU].grid.isVisible()
+    assert json.loads(settings.value("expanded_cards")) == []
+
+
+def test_half_width_cards_pair_up_when_both_fit(qtbot) -> None:  # type: ignore[no-untyped-def]
+    from PySide6.QtWidgets import QWidget
+
+    from corewatch.gui.cards import CardDeck
+
+    deck = CardDeck()
+    qtbot.addWidget(deck)
+    wide, a, b, c = QWidget(), QWidget(), QWidget(), QWidget()
+    deck.set_cards([(a, False), (wide, True), (b, False), (c, False)])  # placed before the deck shows
+    places = lambda width: [(r, col, cs) for _, r, col, _, cs in deck.arrangement(width)]  # noqa: E731
+    assert places(1000) == [(0, 0, 1), (1, 0, 2), (2, 0, 1), (2, 1, 1)]  # a wide card starts a line
+    assert places(851) == [(0, 0, 1), (1, 0, 1), (2, 0, 1), (3, 0, 1)]  # 2 x 420 + 12 doesn't fit
+    assert places(852) == places(1000)
+    b.hide()
+    assert places(1000) == [(0, 0, 1), (1, 0, 2), (2, 0, 1)]  # a hidden card leaves no hole
+    deck.set_need(c, 600)  # a card showing its full list needs more room beside another
+    assert deck.columns_for(1000) == 1
+    deck.set_need(c, 420)
+    assert deck.columns_for(1000) == 2
+    deck.set_cards([(wide, True)])
+    assert deck.columns_for(500) == 1  # no half cards: nothing to pair
+
+
+def test_the_deck_is_as_tall_as_its_cards_and_no_taller(qtbot, settings) -> None:  # type: ignore[no-untyped-def]
+    window = make_window(qtbot, settings, [full_machine()])
+    window.resize(1300, 700)
+    window.show()
+    window.refresh()
+    QApplication.processEvents()
+    fans, storage = window.sections["Fans"], window.sections["Storage"]
+    assert fans.geometry().top() == storage.geometry().top()  # side by side
+    page = window.list_area.widget()
+    assert page.height() > window.list_area.viewport().height()  # it scrolls, so its height is its own
+    content = window.deck.geometry().bottom()
+    assert page.height() - content < 20  # not a long blank tail sized for one card per line
+
+
+def test_compact_views_open_a_sensor_by_click_or_keyboard(qtbot, settings) -> None:  # type: ignore[no-untyped-def]
+    window = make_window(qtbot, settings, [full_machine()])
+    window.resize(1300, 900)
+    window.show()
+    window.refresh()
+    QApplication.processEvents()
+    fans = window.sections["Fans"].view
+    second = fans.place(fans.width())[1]
+    qtbot.mouseClick(fans, Qt.MouseButton.LeftButton, pos=second.center().toPoint())
+    assert window.selected_key == "fan7" and fans.selected_key == "fan7"
+    assert window.sections["Storage"].view.selected_key == "fan7"  # one highlight across the cards
+
+    storage = window.sections["Storage"].view
+    storage.setFocus(Qt.FocusReason.TabFocusReason)
+    for key in (Qt.Key.Key_End, Qt.Key.Key_Return):
+        qtbot.keyClick(storage, key)
+    assert window.selected_key == "n1"
+    for key in (Qt.Key.Key_Down, Qt.Key.Key_Home, Qt.Key.Key_Right, Qt.Key.Key_Left, Qt.Key.Key_Enter):
+        qtbot.keyClick(storage, key)
+    assert window.selected_key == "n0"
+    tiles = window.sections[CPU].view.tiles
+    first = tiles.place(tiles.width())[0]
+    qtbot.mouseClick(tiles, Qt.MouseButton.LeftButton, pos=first.center().toPoint())
+    assert window.selected_key == "pkgw"
+    window.grab()  # paints every view, the selected tile included
+
+
+def test_no_card_ever_opens_as_a_window_of_its_own(qtbot, settings) -> None:  # type: ignore[no-untyped-def]
+    from corewatch.gui.sensors import CategorySection
+
+    class Watch(QObject):
+        def __init__(self) -> None:
+            super().__init__()
+            self.windows: list[str] = []
+
+        def eventFilter(self, watched: QObject, event: QEvent) -> bool:
+            if event.type() == QEvent.Type.Show and isinstance(watched, CategorySection) and watched.isWindow():
+                self.windows.append(watched.device)
+            return False
+
+    watch = Watch()
+    QApplication.instance().installEventFilter(watch)
+    try:
+        window = make_window(qtbot, settings, [full_machine()])
+        window.refresh()  # the first cards are built before the window shows
+        window.show()
+        QApplication.processEvents()
+    finally:
+        QApplication.instance().removeEventFilter(watch)
+    assert watch.windows == []
+    assert all(window.deck.grid.indexOf(section) >= 0 for section in window.sections.values())
+
+
+def _painted_colours(widget) -> set[str]:  # type: ignore[no-untyped-def]
+    image = widget.grab().toImage()
+    return {image.pixelColor(x, y).name() for x in range(image.width()) for y in range(image.height())}
+
+
+def test_amber_on_a_fan_bar_means_driven_hard_not_at_its_own_top_speed(qtbot) -> None:  # type: ignore[no-untyped-def]
+    from corewatch.gui.cards import FanView
+    from corewatch.model import Row
+
+    view = FanView()
+    qtbot.addWidget(view)
+    view.resize(400, 80)
+    warning = QColor(theme.current_theme().warning).name()
+    view.set_data(_view_data([Row(_gathered("f", "Motherboard · Z790", "Fan 3", Kind.FAN, 600.0))]))
+    assert view.items[0].share == 1.0  # type: ignore[attr-defined]  # its fastest yet: a full bar...
+    assert warning not in _painted_colours(view)  # ...but nothing says it's working hard
+    view.set_data(_view_data([Row(_gathered("p", "GPU · GTX 1080", "GPU fan speed", Kind.FAN_DUTY, 95.0))]))
+    assert warning in _painted_colours(view)
+
+
+def test_tile_arrows_move_by_line_and_let_the_page_scroll_at_the_ends(qtbot) -> None:  # type: ignore[no-untyped-def]
+    from corewatch.gui.cards import RailView
+
+    rails = _rows([_reading(f"v{n}", "Motherboard · Z790", f"+{n}V", Kind.VOLTAGE, float(n)) for n in range(7)])
+    view = RailView()
+    qtbot.addWidget(view)
+    view.resize(500, 300)  # three to a line
+    view.set_data(_view_data(rails))
+    assert view.columns() == 3
+    view.setFocus(Qt.FocusReason.TabFocusReason)
+    moves = []
+    for key in (Qt.Key.Key_Down, Qt.Key.Key_Down, Qt.Key.Key_Right, Qt.Key.Key_Up, Qt.Key.Key_Up, Qt.Key.Key_Up):
+        qtbot.keyClick(view, key)
+        moves.append(view.focus_index)
+    assert moves == [3, 6, 6, 3, 0, 0]  # down a line, past the last item stays put, up a line
+    qtbot.keyClick(view, Qt.Key.Key_Left)
+    assert view.focus_index == 0
+    from PySide6.QtGui import QKeyEvent
+
+    cases = [
+        (0, Qt.Key.Key_Up, 0, True),  # first line: up goes to the page
+        (0, Qt.Key.Key_Down, 3, False),
+        (4, Qt.Key.Key_Down, 6, False),  # the last line is short: down to its last item
+        (5, Qt.Key.Key_Down, 6, False),
+        (6, Qt.Key.Key_Down, 6, True),  # last line: down goes to the page
+    ]
+    for index, key, lands, passed_on in cases:
+        view.focus_index = index
+        event = QKeyEvent(QEvent.Type.KeyPress, key, Qt.KeyboardModifier.NoModifier)
+        view.keyPressEvent(event)
+        assert (view.focus_index, event.isAccepted()) == (lands, not passed_on), (index, key)
+
+
+def test_keyboard_scrolls_the_focused_item_into_sight(qtbot, settings) -> None:  # type: ignore[no-untyped-def]
+    window = make_window(qtbot, settings, [full_machine()])
+    window.resize(1300, 520)
+    window.show()
+    window.refresh()
+    QApplication.processEvents()
+    storage = window.sections["Storage"].view
+    viewport = window.list_area.viewport()
+    assert window.list_area.verticalScrollBar().value() == 0
+    assert storage.mapTo(viewport, QPoint(0, 0)).y() > viewport.height()  # starts out of sight
+    storage.setFocus(Qt.FocusReason.TabFocusReason)
+    qtbot.keyClick(storage, Qt.Key.Key_End)
+    QApplication.processEvents()
+    rect = storage.place(storage.width())[-1]
+    top = storage.mapTo(viewport, rect.topLeft().toPoint()).y()
+    assert top >= 0 and top + rect.height() <= viewport.height()
+
+
+def test_a_reading_alone_never_relayouts_a_view(qtbot, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    from corewatch.gui.cards import CpuTileView, NetworkView
+
+    calls = []
+    for cls in (CpuTileView, NetworkView):
+        monkeypatch.setattr(cls, "updateGeometry", lambda self: calls.append(type(self).__name__))
+    tiles = CpuTileView()
+    qtbot.addWidget(tiles)
+    tiles.set_data(_view_data(_rows(machine())))
+    assert calls == ["CpuTileView"]
+    hot = machine(cores={"P-core 0": 90.0, "P-core 1": 56.0, "E-core 0": 38.0, "E-core 1": 72.0})
+    tiles.set_data(_view_data(_rows(hot)))  # the hottest core changes, the tiles don't
+    assert tiles.items[-1].value == "P0 90.0"  # type: ignore[attr-defined]
+    assert calls == ["CpuTileView"]
+
+    nic = "Network · enp7s0"
+    traffic = [_reading("rx", nic, "Download", Kind.THROUGHPUT, 0.0)]
+    network = NetworkView()
+    qtbot.addWidget(network)
+    network.set_data(_view_data(_rows(traffic)))
+    network.set_data(_view_data(_rows(traffic)))
+    assert calls == ["CpuTileView", "NetworkView"]
+    network.set_data(_view_data(_rows([*traffic, temp("phy", nic, 50.0, label="PHY Temperature")])))
+    assert calls == ["CpuTileView", "NetworkView", "NetworkView"]  # a footer turned up: taller
+
+
+def test_cpu_view_puts_its_tiles_under_the_heat_map_when_narrow(qtbot) -> None:  # type: ignore[no-untyped-def]
+    from PySide6.QtWidgets import QBoxLayout
+
+    from corewatch.gui.cards import CpuView
+
+    view = CpuView()
+    qtbot.addWidget(view)
+    view.set_data(_view_data(_rows(machine())))
+    view.show()
+    view.resize(819, 400)
+    assert view.box.direction() == QBoxLayout.Direction.TopToBottom
+    view.resize(900, 400)
+    assert view.box.direction() == QBoxLayout.Direction.LeftToRight
+    view.resize(819, 400)
+    assert view.box.direction() == QBoxLayout.Direction.TopToBottom
+    view.resize(820, 400)
+    assert view.box.direction() == QBoxLayout.Direction.LeftToRight
+
+
+def test_cards_are_never_paired_narrower_than_they_can_go(qtbot, settings) -> None:  # type: ignore[no-untyped-def]
+    from PySide6.QtWidgets import QWidget
+
+    from corewatch.gui.cards import CardDeck
+    from corewatch.model import Reading
+
+    deck = CardDeck()
+    qtbot.addWidget(deck)
+    a, b = QWidget(), QWidget()
+    deck.set_cards([(a, False), (b, False)])
+    assert deck.columns_for(1000) == 2
+    b.setMinimumWidth(600)
+    assert deck.columns_for(1000) == 1 and deck.columns_for(1212) == 2
+
+    board = "Motherboard · ROG STRIX Z790-A GAMING WIFI"
+    readings = [
+        *machine(),
+        Reading("fan2", board, "Fan 2", Kind.FAN, 1500.0),
+        Reading("vcore", board, "CPU core (Vcore)", Kind.VOLTAGE, 1.136),
+        temp("n0", "NVMe nvme0 · Samsung SSD 980", 34.0, label="Composite"),
+        Reading("rx", "Network · enp7s0", "Download", Kind.THROUGHPUT, 0.0),
+    ]
+    window = make_window(qtbot, settings, [readings])
+    window.resize(1300, 900)
+    window.show()
+    window.refresh()
+    QApplication.processEvents()
+    title = window.sections[board].title
+    assert window.deck.columns_for(window.deck.width()) == 2  # a long board name doesn't stop pairing
+    assert title.shown_text().endswith("…") and title.toolTip() == board  # it's cut, and whole on hover
+    assert window.sections["Fans"].title.toolTip() == ""
+    for width in range(1300, 850, -50):
+        window.resize(width, 900)
+        qtbot.waitUntil(lambda w=width: window.width() == max(w, window.minimumSizeHint().width()))
+        QApplication.processEvents()
+        squeezed = [d for d, s in window.sections.items() if s.isVisible() and s.width() < s.minimumSizeHint().width()]
+        assert squeezed == [], width
+
+
+def test_a_card_showing_its_list_needs_the_lists_width_beside_another(qtbot, settings) -> None:  # type: ignore[no-untyped-def]
+    window = make_window(qtbot, settings, [full_machine()])
+    window.resize(1300, 900)
+    window.show()
+    window.refresh()
+    fans = window.sections["Fans"]
+    assert window.deck.needs[id(fans)] == theme.px(420)
+    fans.table_button.click()
+    assert window.deck.needs[id(fans)] == max(theme.px(420), fans.grid.cell_min_width() + 28)
+    assert window.deck.needs[id(fans)] > theme.px(420)  # the list is the wider of the two here
+
+
+def test_side_by_side_cards_line_their_titles_up(qtbot, settings) -> None:  # type: ignore[no-untyped-def]
+    window = make_window(qtbot, settings, [full_machine()])
+    window.resize(1300, 900)
+    window.show()
+    window.refresh()
+    QApplication.processEvents()
+    board, acpi = window.sections["Motherboard · Z790"], window.sections["Motherboard · ACPI thermal zone"]
+    assert board.table_button.isVisible() and not acpi.table_button.isVisible()
+    assert board.geometry().top() == acpi.geometry().top()
+    centre = lambda label: label.mapTo(window, QPoint(0, label.height() // 2)).y()  # noqa: E731  # text sits mid-label
+    assert centre(board.title) == centre(acpi.title)
+    assert board.header.height() == acpi.header.height()
+
+
+def test_the_deck_forgets_the_widths_of_cards_it_no_longer_has(qtbot) -> None:  # type: ignore[no-untyped-def]
+    from PySide6.QtWidgets import QWidget
+
+    from corewatch.gui.cards import CardDeck
+
+    deck = CardDeck()
+    qtbot.addWidget(deck)
+    a, b = QWidget(), QWidget()
+    deck.set_cards([(a, False), (b, False)])
+    deck.set_need(a, 500)
+    deck.set_need(b, 600)
+    deck.set_cards([(b, False)])
+    assert deck.needs == {id(b): 600}
+
+
+# ----- the focus view: one sensor across the whole window --------------------------------------
+
+
+def test_dial_scale_words_and_headroom() -> None:
+    from corewatch.gui.focus import dial_full_scale, headroom, reading_word, trend_word
+    from corewatch.model import Reading
+
+    def r(kind: Kind, value: float | None, **extra: float | None) -> Reading:
+        return Reading("k", CPU, "x", kind, value, **extra)
+
+    assert [
+        dial_full_scale(r(Kind.TEMPERATURE, 50.0, crit=100.0)),
+        dial_full_scale(r(Kind.TEMPERATURE, 50.0, crit=105.0)),
+        dial_full_scale(r(Kind.TEMPERATURE, 50.0, high=80.0)),  # never under 100 °C
+        dial_full_scale(r(Kind.TEMPERATURE, 50.0)),
+        dial_full_scale(r(Kind.LOAD, 5.0)),
+        dial_full_scale(r(Kind.FAN_DUTY, 5.0)),
+        dial_full_scale(r(Kind.POWER, 53.9, cap=150.0)),
+    ] == [110.0, 115.0, 100.0, 100.0, 100.0, 100.0, 150.0]
+    no_scale = [r(Kind.POWER, 53.9), r(Kind.POWER, 5.0, cap=0.0), r(Kind.VOLTAGE, 1.2), r(Kind.FAN, 900.0)]
+    assert [dial_full_scale(reading) for reading in no_scale] == [None] * 4  # a cap of 0 is no scale
+
+    assert [reading_word(r(Kind.TEMPERATURE, v, high=80.0, crit=100.0)) for v in (35.0, 45.0, 55.0, 72.0)] == [
+        "cool",
+        "mild",
+        "warm",
+        "hot",
+    ]
+    assert reading_word(r(Kind.TEMPERATURE, 85.0, high=80.0, crit=100.0)) == "past its limit"
+    assert reading_word(r(Kind.TEMPERATURE, 101.0, high=80.0, crit=100.0)) == "critical"
+    assert reading_word(r(Kind.LOAD, 50.0)) == "" and reading_word(r(Kind.TEMPERATURE, None)) == ""
+
+    assert headroom(r(Kind.TEMPERATURE, 55.0, high=80.0, crit=100.0), False) == ("25.0 °C", "to the high limit")
+    assert headroom(r(Kind.TEMPERATURE, 55.0, high=80.0), True) == (
+        "45.0 °F",
+        "to the high limit",
+    )  # a gap, not a temperature
+    assert headroom(r(Kind.TEMPERATURE, 85.0, high=80.0), False) == ("5.0 °C", "past the high limit")
+    assert headroom(r(Kind.TEMPERATURE, 60.0, crit=100.0), False) == ("40.0 °C", "to critical")
+    assert headroom(r(Kind.POWER, 53.9, cap=100.0), False) == ("46.1 W", "to its limit")
+    assert headroom(r(Kind.VOLTAGE, 3.3, low=3.0), False) == ("0.300 V", "above the low limit")
+    assert headroom(r(Kind.CLOCK, 5300.0), False) == ("—", "no limit reported")
+    assert headroom(r(Kind.TEMPERATURE, None, high=80.0), False) == ("—", "no reading")
+
+    assert [trend_word(t, Kind.TEMPERATURE) for t in ("↑ +2.1 °C/min", "↓ -0.4 °C/min", "→ steady", "—")] == [
+        "warming",
+        "cooling",
+        "steady",
+        "",
+    ]
+    assert [trend_word(t, Kind.FAN) for t in ("↑ +40 RPM/min", "↓ -40 RPM/min")] == ["rising", "falling"]
+
+
+def test_tiles_even_out_their_lines_and_the_average_follows_the_last_minute() -> None:
+    from corewatch.gui.focus import balanced
+    from corewatch.gui.widgets import rolling_average
+
+    assert [balanced(n, fits) for n, fits in ((8, 7), (16, 7), (3, 7), (8, 8), (9, 4), (5, 1), (0, 5), (4, 0))] == [
+        4,  # 4 and 4, not 7 and 1
+        6,  # 6, 6 and 4
+        3,
+        8,
+        3,
+        1,
+        1,
+        1,
+    ]
+    points = [(0.0, 10.0), (30.0, 20.0), (61.0, 30.0), (90.0, 40.0)]
+    assert rolling_average(points, 60.0) == [(0.0, 10.0), (30.0, 15.0), (61.0, 25.0), (90.0, 30.0)]
+    assert rolling_average([], 60.0) == []
+
+
+def test_focus_stats_say_what_each_number_means() -> None:
+    from corewatch.gui.focus import focus_stats
+    from corewatch.model import Reading, Row, Stats
+
+    stats = Stats()
+    for t, v in ((100.0, 41.0), (101.0, 62.0), (102.0, 50.0)):
+        stats.add(v, t)
+    row = Row(Reading("pkg", CPU, "CPU package", Kind.TEMPERATURE, 50.0, high=80.0, crit=100.0), stats)
+    shown = focus_stats(row, 102.0, False, lambda t: t)
+    assert [(s.title, s.value) for s in shown] == [
+        ("Lowest", "41.0 °C"),
+        ("Highest", "62.0 °C"),
+        ("Session average", "51.0 °C"),
+        ("Last minute", "51.0 °C"),
+        ("Last 5 min", "51.0 °C"),
+        ("Variation", "± 8.6 °C"),
+        ("Past a limit", "0 s"),
+        ("At critical", "0 s"),
+    ]
+    assert shown[0].note.startswith("at ") and shown[2].note.startswith("since ")
+    assert (shown[6].note, shown[7].note) == ("never past 80.0 °C", "never at 100.0 °C")
+    stats.seconds_warning, stats.seconds_critical = 12.0, 3.0
+    hot = focus_stats(row, 102.0, True, lambda t: t)
+    assert (hot[6].value, hot[6].note) == ("15 s", "past the high limit")
+    assert (hot[7].value, hot[7].note) == ("3 s", "at or above 212.0 °F")
+    bare = Row(Reading("clk", CPU, "P-core 0 clock", Kind.CLOCK, 5300.0), stats)
+    assert [(s.value, s.note) for s in focus_stats(bare, 102.0, False, lambda t: t)[6:]] == [
+        ("no limit", "none reported"),
+        ("no limit", "none reported"),
+    ]
+    only_crit = Row(Reading("t", CPU, "x", Kind.TEMPERATURE, 50.0, crit=100.0), Stats())
+    assert focus_stats(only_crit, 102.0, False, lambda t: t)[6].note == "never at 100.0 °C"
+
+
+def test_the_focus_chart_keeps_the_limits_in_view(qtbot) -> None:  # type: ignore[no-untyped-def]
+    from corewatch.gui.widgets import HistoryChart
+    from corewatch.model import Reading, Row, Stats
+
+    stats = Stats()
+    for t in range(10):
+        stats.add(40.0 + t % 3, float(t))
+    row = Row(Reading("pkg", CPU, "CPU package", Kind.TEMPERATURE, 41.0, high=80.0, crit=100.0), stats)
+    plain, focus = HistoryChart(), HistoryChart(focus=True)
+    for chart in (plain, focus):
+        qtbot.addWidget(chart)
+        chart.resize(600, 300)
+        chart.set_data(row, 60.0, False, 5.0, 9.0)
+    points = stats.window(60.0, 9.0)
+    assert plain.scale(points)[1] < 80.0  # the overview's chart zooms in on the readings
+    low, high = focus.scale(points)
+    assert low <= 40.0 and high >= 100.0  # the focus chart shows how far off the limits are
+    focus.grab()
+    focus.hover_x = 300.0
+    focus.grab()  # paints the zone, the named limits, the average and the hover bubble
+
+
+def test_the_dial_names_its_limits_and_rings_only_what_has_a_scale(qtbot) -> None:  # type: ignore[no-untyped-def]
+    from corewatch.gui.focus import Dial
+    from corewatch.model import Reading
+
+    dial = Dial()
+    qtbot.addWidget(dial)
+    dial.resize(dial.sizeHint())
+    dial.set_reading(Reading("pkg", CPU, "CPU package", Kind.TEMPERATURE, 55.0, high=80.0, crit=100.0), False)
+    assert dial.legend() == [("warning", "high 80.0 °C"), ("critical", "critical 100.0 °C")]
+    assert dial.accessibleName() == "Now 55.0 °C warm"
+    ringed = _painted_colours(dial)
+    dial.set_reading(Reading("v", CPU, "Core voltage", Kind.VOLTAGE, 1.2, high=1.5), False)
+    assert dial.legend() == []  # no ring, so nothing on it to name
+    assert dial.accessibleName() == "Now 1.200 V"
+    edge = QColor(theme.current_theme().edge).name()
+    assert edge in ringed and edge not in _painted_colours(dial)  # the ring's track is gone
+
+
+def _open_window(qtbot, settings, script=None):  # type: ignore[no-untyped-def]
+    window = make_window(qtbot, settings, script or [full_machine()])
+    window.resize(1300, 900)
+    window.show()
+    window.refresh()
+    window.refresh()
+    QApplication.processEvents()
+    return window
+
+
+def test_focus_view_opens_from_the_detail_panel_and_esc_goes_back(qtbot, settings) -> None:  # type: ignore[no-untyped-def]
+    window = _open_window(qtbot, settings)
+    focus = window.focus
+    assert window.pages.currentWidget() is window.splitter and window.focus_key is None
+    assert window.detail.focus_button.accessibleName() == "Focus view"
+    window.detail.focus_button.click()  # the selected sensor: the CPU package
+    assert window.pages.currentWidget() is focus and window.focus_key == "pkg"
+    assert (focus.device.text(), focus.title.text()) == ("CPU · I7", "CPU package")
+    assert focus.cores_panel.isVisible() and len(focus.cores.items) == 4  # every core, on one scale
+    assert [(i.name, i.value, i.note) for i in focus.cores.items] == [  # type: ignore[attr-defined]
+        ("P-core 0", "41°", "max 41° · 5,300 MHz"),
+        ("P-core 1", "56°", "max 56° · 2,100 MHz"),
+        ("E-core 0", "38°", "max 38°"),  # no clock reported for it
+        ("E-core 1", "72°", "max 72°"),
+    ]
+    assert focus.cores.selected_key == "pkg"
+    assert [s.title for s in focus.outlook.stats] == ["Headroom", "Trend"]
+    assert focus.outlook.stats[0].value == "25.0 °C"
+    QApplication.processEvents()
+    assert focus.back_button.hasFocus()
+    qtbot.keyClick(focus.back_button, Qt.Key.Key_Escape)
+    assert window.pages.currentWidget() is window.splitter and window.focus_key is None
+
+    grid = window.sections[GPU].grid
+    cell = next(c for c in grid.cells() if c.key == "hot")
+    qtbot.mouseDClick(grid, Qt.MouseButton.LeftButton, pos=cell.rect.center())
+    assert window.focus_key == "hot" and window.selected_key == "hot"
+    assert focus.title.text() == "Hotspot temperature" and not focus.cores_panel.isVisible()  # not a CPU sensor
+    focus.back_button.click()
+    assert window.pages.currentWidget() is window.splitter
+    window.close_focus()  # already closed: nothing happens
+    assert window.focus_key is None
+
+
+def test_double_click_opens_the_focus_view_from_every_view(qtbot, settings) -> None:  # type: ignore[no-untyped-def]
+    window = _open_window(qtbot, settings)
+    gauge = window.gauges.gauges[1]
+    qtbot.mouseDClick(gauge, Qt.MouseButton.LeftButton)
+    assert window.focus_key == "gpu"
+    window.close_focus()
+
+    heat_map = window.sections[CPU].view.heat_map
+    tile = next(t for t in heat_map._layout_tiles() if t.name == "P1")
+    qtbot.mouseDClick(heat_map, Qt.MouseButton.LeftButton, pos=tile.shape.boundingRect().center().toPoint())
+    assert window.focus_key == "core/P-core 1"
+    window.close_focus()
+
+    tiles = window.sections[CPU].view.tiles
+    qtbot.mouseDClick(tiles, Qt.MouseButton.LeftButton, pos=tiles.place(tiles.width())[0].center().toPoint())
+    assert window.focus_key == "pkgw"
+    window.close_focus()
+
+    fans = window.sections["Fans"].view
+    qtbot.mouseDClick(fans, Qt.MouseButton.LeftButton, pos=fans.place(fans.width())[1].center().toPoint())
+    assert window.focus_key == "fan7"
+    window.close_focus()
+    window.open_focus("not-a-sensor")
+    assert window.focus_key is None and window.pages.currentWidget() is window.splitter
+
+
+def test_focus_view_shares_the_chart_window_with_the_detail_panel(qtbot, settings) -> None:  # type: ignore[no-untyped-def]
+    window = _open_window(qtbot, settings)
+    window.open_focus("pkg")
+    focus = window.focus
+    assert focus.window_seconds == window.detail.window_seconds == 300.0
+    focus.window_buttons.buttons()[2].click()  # 15 min
+    assert window.detail.window_seconds == 900.0 and focus.window_seconds == 900.0
+    assert settings.value("detail_window", type=float) == 900.0
+    assert focus.chart.window_seconds == 900.0 and focus.cores.window_seconds == 900.0
+    assert focus.chart_title.text() == "LAST 15 MINUTES" and focus.cores_note.text() == "same 15 minutes, same scale"
+    window.detail.set_window(60.0)
+    assert focus.window_seconds == 60.0 and focus.window_buttons.buttons()[0].isChecked()
+    assert focus.chart_title.text() == "LAST 1 MINUTE"
+
+
+def test_focus_view_renames_pins_and_steps_to_another_core(qtbot, settings, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    window = _open_window(qtbot, settings)
+    made: list[FakeTray] = []
+    window.attach_tray(lambda: made.append(FakeTray()) or made[-1])  # type: ignore[arg-type,func-returns-value]
+    window.open_focus("pkg")
+    focus = window.focus
+    monkeypatch.setattr(window, "_ask_name", lambda current: "Package")
+    focus.rename_button.click()
+    assert focus.title.text() == "Package" and window.names == {"pkg": "Package"}
+    assert focus.pin_button.isEnabled() and not focus.pin_button.isChecked()
+    focus.pin_button.click()
+    assert "pkg" in window.trays and focus.pin_button.text() == "Pinned to tray"
+    window.set_pinned("pkg", False)
+    window.refresh()
+    assert not focus.pin_button.isChecked() and focus.pin_button.text() == "Pin to tray"
+
+    strip = focus.cores
+    index = [i.key for i in strip.items].index("core/E-core 1")
+    qtbot.mouseClick(strip, Qt.MouseButton.LeftButton, pos=strip.place(strip.width())[index].center().toPoint())
+    assert window.focus_key == "core/E-core 1" and focus.title.text() == "E-core 1"
+    assert window.selected_key == "core/E-core 1" and strip.selected_key == "core/E-core 1"
+    assert window.pages.currentWidget() is focus
+
+
+def test_focus_view_closes_for_a_search_or_a_sensor_that_goes_away(qtbot, settings) -> None:  # type: ignore[no-untyped-def]
+    gone = [r for r in full_machine() if r.key != "hot"]
+    window = _open_window(qtbot, settings, [full_machine()] * 3 + [gone])  # the window reads once on its own
+    window.open_focus("pkg")
+    window.filter.setText("gpu")
+    assert window.focus_key is None and window.pages.currentWidget() is window.splitter
+    window.filter.clear()
+    window.open_focus("hot")
+    assert window.focus_key == "hot" and window.pages.currentWidget() is window.focus
+    window.refresh()  # the hotspot stops reporting
+    assert window.focus_key is None and window.pages.currentWidget() is window.splitter
+
+
+def test_focus_view_fits_the_narrowest_window(qtbot, settings) -> None:  # type: ignore[no-untyped-def]
+    from PySide6.QtWidgets import QBoxLayout
+
+    window = _open_window(qtbot, settings)
+    window.open_focus("pkg")
+    narrowest = window.minimumSizeHint().width()
+    assert narrowest <= 720  # the focus view and its button don't widen the window
+    window.resize(narrowest, 900)
+    qtbot.waitUntil(lambda: window.width() == narrowest)
+    QApplication.processEvents()
+    focus = window.focus
+    assert focus.top.direction() == QBoxLayout.Direction.TopToBottom  # the dial over the chart
+    for widget in (focus.back_button, focus.rename_button, focus.pin_button, *focus.window_buttons.buttons()):
+        assert widget.isVisible() and widget.width() >= widget.minimumSizeHint().width()
+    window.resize(1300, 900)
+    qtbot.waitUntil(lambda: window.width() == 1300)
+    assert focus.top.direction() == QBoxLayout.Direction.LeftToRight
+
+
+def test_headroom_and_notes_know_which_side_of_a_limit_a_sensor_is() -> None:
+    from corewatch.gui.focus import dial_full_scale, focus_stats, headroom
+    from corewatch.model import Reading, Row, Stats
+
+    def r(kind: Kind, value: float | None, **extra: float | None) -> Reading:
+        return Reading("k", CPU, "x", kind, value, **extra)
+
+    assert headroom(r(Kind.FAN, 0.0, low=300.0), False) == ("300 RPM", "below the low limit")  # a stopped fan
+    rail = {"low": 11.4, "high": 12.6}
+    assert headroom(r(Kind.VOLTAGE, 11.2, **rail), False) == ("0.200 V", "below the low limit")
+    assert headroom(r(Kind.VOLTAGE, 11.6, **rail), False) == ("0.200 V", "above the low limit")  # the nearer one
+    assert headroom(r(Kind.VOLTAGE, 12.4, **rail), False) == ("0.200 V", "to the high limit")
+    assert dial_full_scale(r(Kind.TEMPERATURE, 1.0, crit=0.0, high=95.0)) == 100.0  # a critical of 0 still counts
+
+    def past(reading: Reading, seconds: float) -> tuple[str, str]:
+        stats = Stats()
+        stats.seconds_warning = seconds
+        stat = focus_stats(Row(reading, stats), 0.0, False, lambda t: t)[6]
+        return stat.value, stat.note
+
+    assert past(r(Kind.TEMPERATURE, 50.0, crit=84.8), 30.0) == ("30 s", "at critical")  # an NVMe drive
+    assert past(r(Kind.VOLTAGE, 12.0, **rail), 0.0) == ("0 s", "never outside its limits")
+    assert past(r(Kind.VOLTAGE, 12.0, **rail), 5.0) == ("5 s", "outside its limits")
+    assert past(r(Kind.FAN, 900.0, low=300.0), 0.0) == ("0 s", "never below 300 RPM")
+    assert past(r(Kind.FAN, 900.0, low=300.0), 5.0) == ("5 s", "below the low limit")
+
+
+def test_esc_goes_back_wherever_the_keyboard_is(qtbot, settings) -> None:  # type: ignore[no-untyped-def]
+    window = _open_window(qtbot, settings)
+    window.activateWindow()
+    qtbot.waitActive(window)
+    assert not window.close_focus_shortcut.isEnabled()  # Esc is left alone until the focus view opens
+    window.open_focus("pkg")
+    assert window.close_focus_shortcut.isEnabled()
+    window.fahrenheit_button.setFocus()  # the keyboard has left the focus view
+    qtbot.keyClick(window.fahrenheit_button, Qt.Key.Key_Escape)
+    assert window.focus_key is None and not window.close_focus_shortcut.isEnabled()
+
+
+def test_hiding_the_focused_sensor_goes_back(qtbot, settings) -> None:  # type: ignore[no-untyped-def]
+    from corewatch.model import Reading
+
+    idle = Reading("idle", CPU, "Unused input", Kind.TEMPERATURE, 0.0, unused=True)
+    window = _open_window(qtbot, settings, [[*machine(), idle]])
+    window.set_show_unused(True)
+    window.open_focus("idle")
+    assert window.focus_key == "idle"
+    window.set_show_unused(False)
+    assert window.focus_key is None and window.pages.currentWidget() is window.splitter
+
+
+def test_a_cut_title_shows_its_whole_name_until_the_text_changes(qtbot) -> None:  # type: ignore[no-untyped-def]
+    from corewatch.gui.widgets import ElidedLabel
+
+    label = ElidedLabel()
+    qtbot.addWidget(label)
+    label.resize(100, 30)
+    label.show()
+    label.setText("Motherboard · ROG STRIX Z790-A GAMING WIFI")
+    assert label.toolTip() == "Motherboard · ROG STRIX Z790-A GAMING WIFI"
+    label.setText("Short")
+    assert label.toolTip() == ""

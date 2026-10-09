@@ -77,6 +77,9 @@ class Reading:
     empty_if_idle: bool = False
     # The device this reading really comes from, when it's shown in another card (Fans).
     origin: str | None = None
+    # From graphics built into the CPU (Intel integrated graphics, an AMD APU). Its power is part
+    # of the CPU's package power, or on an APU covers the whole chip: never add the two together.
+    integrated: bool = False
 
     @property
     def status(self) -> Status:

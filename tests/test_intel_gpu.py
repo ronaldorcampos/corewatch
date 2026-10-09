@@ -197,6 +197,7 @@ def test_rapl_files_integrated_graphics_power_under_the_gpu_card(tmp_path: Path,
     write_tree(tmp_path / "powercap", {"intel-rapl:0:1/energy_uj": "2000000"})
     package, graphics = source.sample()
     assert (package.device, package.label) == ("CPU · Intel Core i7-13700K", "Package power")
+    assert graphics.integrated and not package.integrated  # part of the package power: never add them
     assert (graphics.key, graphics.device, graphics.label) == (
         "rapl/intel-rapl:0:1",  # unchanged, so pins and your own names carry over
         "GPU · Intel UHD Graphics 770",
@@ -210,6 +211,7 @@ def test_rapl_keeps_it_with_the_cpu_when_the_igpu_is_off(tmp_path: Path, proc_ro
     source = RaplSource(tmp_path / "powercap", proc_root, drm_root=tmp_path / "no-drm", pci_ids=pci_ids(tmp_path))
     _, graphics = source.sample()
     assert (graphics.device, graphics.label) == ("CPU · Intel Core i7-13700K", "Integrated graphics power")
+    assert not graphics.integrated  # filed under the CPU, like the rest of its power
 
 
 def test_discrete_gpus_are_listed_before_the_integrated_one(tmp_path: Path, proc_root: Path) -> None:
@@ -377,6 +379,8 @@ def test_an_igpu_next_to_an_arc_card(tmp_path: Path, proc_root: Path) -> None:
     rapl_tree(tmp_path / "powercap")
     _, graphics = RaplSource(tmp_path / "powercap", proc_root, drm_root=drm, pci_ids=ids).sample()
     assert graphics.device == "GPU · Intel UHD Graphics 770"  # RAPL measures the integrated one only
+    flagged = {(r.device, r.integrated) for r in IntelGpuSource(drm, ids).sample()}
+    assert flagged == {("GPU · Intel UHD Graphics 770", True), ("GPU · Intel Arc A770", False)}
 
 
 def suspend(pci: Path, asleep: bool, users: int = 1) -> None:

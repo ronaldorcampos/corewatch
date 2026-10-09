@@ -5,8 +5,21 @@ import math
 import time
 from collections.abc import Callable, Sequence
 
-from PySide6.QtCore import QEvent, QPointF, QRectF, Qt, Signal
-from PySide6.QtGui import QColor, QFont, QFontMetrics, QMouseEvent, QPainter, QPainterPath, QPen
+from PySide6.QtCore import QEvent, QPointF, QRectF, QSize, Qt, Signal
+from PySide6.QtGui import (
+    QColor,
+    QFont,
+    QFontMetrics,
+    QIcon,
+    QMouseEvent,
+    QPainter,
+    QPainterPath,
+    QPaintEvent,
+    QPalette,
+    QPen,
+    QPixmap,
+    QResizeEvent,
+)
 from PySide6.QtWidgets import (
     QButtonGroup,
     QFrame,
@@ -18,7 +31,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from corewatch.gui.theme import current_theme
+from corewatch.gui.theme import DISPLAY_FONT, MONO_FONT, current_theme, font, paint_card, px
 from corewatch.model import (
     Kind,
     Row,
@@ -103,6 +116,19 @@ def drawable_segments(
     return [decimate(raw, start, seconds, max(1, pixels)) for raw in split_on_gaps(points, gap)]
 
 
+def rolling_average(points: Sequence[tuple[float, float]], seconds: float) -> list[tuple[float, float]]:
+    """Each reading replaced by the average of the readings in the ``seconds`` up to it."""
+    averaged: list[tuple[float, float]] = []
+    total, first = 0.0, 0
+    for t, value in points:
+        total += value
+        while points[first][0] < t - seconds:
+            total -= points[first][1]
+            first += 1
+        averaged.append((t, total / (len(averaged) + 1 - first)))
+    return averaged
+
+
 def split_on_gaps(points: Sequence[tuple[float, float]], gap: float) -> list[list[tuple[float, float]]]:
     """Break a series wherever samples are missing for longer than ``gap`` seconds."""
     segments: list[list[tuple[float, float]]] = []
@@ -115,10 +141,17 @@ def split_on_gaps(points: Sequence[tuple[float, float]], gap: float) -> list[lis
 
 
 class HistoryChart(QWidget):
-    """A line chart of one sensor with gridlines, limits and lowest/highest markers."""
+    """A line chart of one sensor with gridlines, limits and lowest/highest markers.
 
-    def __init__(self, parent: QWidget | None = None) -> None:
+    ``focus`` is the focus view's larger chart: its scale always takes in the sensor's limits,
+    which are named at the right edge with the critical zone shaded, and a dashed line follows
+    the 1-minute average."""
+
+    AVERAGE_SECONDS = 60.0
+
+    def __init__(self, parent: QWidget | None = None, focus: bool = False) -> None:
         super().__init__(parent)
+        self.focus = focus
         self.setMinimumHeight(150)
         self.row: Row | None = None
         self.window_seconds = 300.0
@@ -127,6 +160,7 @@ class HistoryChart(QWidget):
         self.now = 0.0
         self.to_wall: Callable[[float], float] = lambda t: t
         self.hover_x: float | None = None
+        self.axis_width = 56  # room for the value labels left of the plot, widened to fit them
         self.setMouseTracking(True)
 
     def set_data(
@@ -144,7 +178,10 @@ class HistoryChart(QWidget):
         self.update()
 
     def plot_rect(self) -> QRectF:
-        return QRectF(self.rect()).adjusted(64, 10, -14, -24)
+        """The plot, inside room for its labels, which grow with the desktop's text size."""
+        text_height = QFontMetrics(font(MONO_FONT, 11)).height()
+        top = max(10, (text_height + 1) // 2)  # the top value label is centred on the top line
+        return QRectF(self.rect()).adjusted(self.axis_width + 8, top, -14, -(text_height + 10))
 
     def hovered_point(self) -> tuple[float, float] | None:
         """The reading nearest the mouse, by time, among those in view."""
@@ -180,6 +217,15 @@ class HistoryChart(QWidget):
         self.hover_x = None
         self.update()
 
+    def scale(self, points: Sequence[tuple[float, float]]) -> tuple[float, float]:
+        """The span the readings are drawn against (before rounding to whole ticks)."""
+        assert self.row is not None
+        reading = self.row.reading
+        values = [v for _, v in points]
+        if self.focus:  # the limits stay in view, so you see how close the sensor runs to them
+            values += [limit for limit in (reading.low, reading.high, reading.crit, reading.cap) if limit is not None]
+        return value_range(values, reading.kind)
+
     def _fahrenheit_axis(self, kind: Kind) -> bool:
         return kind is Kind.TEMPERATURE and self.fahrenheit
 
@@ -195,10 +241,10 @@ class HistoryChart(QWidget):
         theme = current_theme()
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        small = QFont(self.font())
-        small.setPixelSize(11)
+        small = font(MONO_FONT, 11)
+        metrics = QFontMetrics(small)
+        text_height = metrics.height()
         painter.setFont(small)
-        plot = self.plot_rect()
         points = self.row.stats.window(self.window_seconds, self.now) if self.row else []
         if self.row is None or not points:
             painter.setPen(QColor(theme.muted))
@@ -206,8 +252,17 @@ class HistoryChart(QWidget):
             painter.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, message)
             return
         kind = self.row.reading.kind
-        low, high = value_range([v for _, v in points], kind)
+        reading = self.row.reading
+        low, high = self.scale(points)
         start = self.now - self.window_seconds
+
+        # Horizontal gridlines on round values; the axis snaps to the outer ticks, and the plot
+        # starts right of the widest label.
+        ticks = nice_ticks(*self._display_range(kind, low, high))
+        low, high = self._from_display(kind, ticks[0]), self._from_display(kind, ticks[-1])
+        labels = [format_value(kind, self._from_display(kind, tick), self.fahrenheit) for tick in ticks]
+        self.axis_width = max(px(56), *(metrics.horizontalAdvance(label) for label in labels))
+        plot = self.plot_rect()
 
         def to_xy(t: float, v: float) -> QPointF:
             return QPointF(
@@ -215,17 +270,14 @@ class HistoryChart(QWidget):
                 plot.bottom() - (v - low) / (high - low) * plot.height(),
             )
 
-        # Horizontal gridlines on round values; the axis snaps to the outer ticks.
-        ticks = nice_ticks(*self._display_range(kind, low, high))
-        low, high = self._from_display(kind, ticks[0]), self._from_display(kind, ticks[-1])
         grid_pen = QPen(QColor(theme.border), 1)
-        for tick in ticks:
+        for tick, label in zip(ticks, labels, strict=True):
             y = to_xy(start, self._from_display(kind, tick)).y()
             painter.setPen(grid_pen)
             painter.drawLine(QPointF(plot.left(), y), QPointF(plot.right(), y))
             painter.setPen(QColor(theme.muted))
-            label = format_value(kind, self._from_display(kind, tick), self.fahrenheit)
-            painter.drawText(QRectF(0, y - 8, plot.left() - 8, 16), Qt.AlignmentFlag.AlignRight, label)
+            box = QRectF(0, y - text_height / 2, plot.left() - 8, text_height)
+            painter.drawText(box, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter, label)
 
         # Time labels on whole steps back from now.
         step = TIME_TICKS.get(self.window_seconds, self.window_seconds / 4)
@@ -238,7 +290,8 @@ class HistoryChart(QWidget):
                 text = f"−{ago / 60:g} min"
             else:
                 text = f"−{ago:g} s"
-            box = QRectF(x - 40, plot.bottom() + 6, 80, 14)
+            width = metrics.horizontalAdvance(text) + 8
+            box = QRectF(x - width / 2, plot.bottom() + 6, width, text_height)
             align = Qt.AlignmentFlag.AlignHCenter
             if ago == self.window_seconds:
                 box.moveLeft(x)
@@ -250,18 +303,31 @@ class HistoryChart(QWidget):
             ago -= step
 
         # Limit lines, only when they fall inside the visible range.
-        reading = self.row.reading
-        for limit, color in (
-            (reading.high, theme.warning),
-            (reading.crit, theme.critical),
-            (reading.low, theme.warning),
-            (reading.cap, theme.muted),  # informational: drawn, never alarming
+        if self.focus and reading.crit is not None and low <= reading.crit <= high:
+            zone = QColor(theme.critical)
+            zone.setAlpha(14)
+            painter.fillRect(QRectF(plot.topLeft(), QPointF(plot.right(), to_xy(start, reading.crit).y())), zone)
+        named = font(DISPLAY_FONT, 9, QFont.Weight.DemiBold, 1.5)
+        for limit, color, name in (
+            (reading.high, theme.warning, "high"),
+            (reading.crit, theme.critical, "critical"),
+            (reading.low, theme.warning, "low"),
+            (reading.cap, theme.muted, "limit"),  # informational: drawn, never alarming
         ):
             if limit is not None and low <= limit <= high:
                 pen = QPen(QColor(color), 1, Qt.PenStyle.DashLine)
                 painter.setPen(pen)
                 y = to_xy(start, limit).y()
                 painter.drawLine(QPointF(plot.left(), y), QPointF(plot.right(), y))
+                if self.focus:
+                    painter.setFont(named)
+                    label = f"{name} {format_value(kind, limit, self.fahrenheit)}".upper()
+                    height = QFontMetrics(named).height()
+                    box = QRectF(plot.left(), y - height - 2, plot.width() - 6, height)
+                    if box.top() < plot.top():  # no room above the line: write it under
+                        box.moveTop(y + 2)
+                    painter.drawText(box, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter, label)
+                    painter.setFont(small)
 
         # The series itself, with a soft fill underneath.
         line_color = theme.status(reading.status)
@@ -289,6 +355,20 @@ class HistoryChart(QWidget):
             painter.setBrush(Qt.BrushStyle.NoBrush)  # an earlier dot may have left a fill brush set
             painter.drawPath(path)
 
+        if self.focus:  # the 1-minute average, dashed, over the reading
+            # Average from a minute before the window, so its left edge is as steady as the rest.
+            earlier = self.row.stats.window(self.window_seconds + self.AVERAGE_SECONDS, self.now)
+            averaged = [p for p in rolling_average(earlier, self.AVERAGE_SECONDS) if p[0] >= start]
+            pen = QPen(QColor(theme.accent_text), 1, Qt.PenStyle.DashLine)
+            painter.setPen(pen)
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            for segment in drawable_segments(averaged, start, self.window_seconds, int(plot.width()) // 2, self.gap):
+                if len(segment) > 1:
+                    path = QPainterPath(to_xy(*segment[0]))
+                    for point in segment[1:]:
+                        path.lineTo(to_xy(*point))
+                    painter.drawPath(path)
+
         # Lowest and highest points in view.
         lowest = min(points, key=lambda p: p[1])
         highest = max(points, key=lambda p: p[1])
@@ -299,8 +379,11 @@ class HistoryChart(QWidget):
             painter.drawEllipse(center, 4, 4)
             painter.setPen(QColor(theme.muted))
             label = f"{text} {format_value(kind, point[1], self.fahrenheit)}"
+            if self.focus and text == "max":  # the peak, and when it was
+                label = f"peak {format_value(kind, point[1], self.fahrenheit)} · {_clock(point[0], self.to_wall)}"
             above = text == "max"
-            box = QRectF(center.x() - 60, center.y() + (-20 if above else 6), 120, 14)
+            width = metrics.horizontalAdvance(label) + 8
+            box = QRectF(center.x() - width / 2, center.y() + (-(text_height + 6) if above else 6), width, text_height)
             box.moveLeft(min(max(box.left(), plot.left()), plot.right() - box.width()))
             if lowest is not highest or above:
                 painter.drawText(box, Qt.AlignmentFlag.AlignHCenter, label)
@@ -316,30 +399,93 @@ class HistoryChart(QWidget):
             painter.setBrush(line_color)
             painter.drawEllipse(center, 5, 5)
             value_text, when_text = hover
-            bold = QFont(small)
-            bold.setPixelSize(13)
-            bold.setBold(True)
-            width = max(
-                QFontMetrics(bold).horizontalAdvance(value_text), QFontMetrics(small).horizontalAdvance(when_text)
-            )
-            bubble = QRectF(center.x() + 12, center.y() - 40, width + 20, 38)
+            bold = font(MONO_FONT, 13, QFont.Weight.Bold)
+            bold_height = QFontMetrics(bold).height()
+            width = max(QFontMetrics(bold).horizontalAdvance(value_text), metrics.horizontalAdvance(when_text))
+            height = bold_height + text_height + 6
+            bubble = QRectF(center.x() + 12, center.y() - height - 2, width + 20, height)
             if bubble.right() > plot.right():  # flip to the left of the point near the right edge
                 bubble.moveRight(center.x() - 12)
             bubble.moveTop(min(max(bubble.top(), plot.top()), plot.bottom() - bubble.height()))
             painter.setPen(QPen(QColor(theme.border), 1))
             painter.setBrush(QColor(theme.raised))
-            painter.drawRoundedRect(bubble, 6, 6)
+            painter.drawRect(bubble)
             painter.setFont(bold)
             painter.setPen(theme.value_color(self.row.reading.status))
-            painter.drawText(
-                bubble.adjusted(10, 3, -10, -18), Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, value_text
-            )
+            value_box = QRectF(bubble.left() + 10, bubble.top() + 3, width, bold_height)
+            painter.drawText(value_box, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, value_text)
             painter.setFont(small)
             painter.setPen(QColor(theme.muted))
-            painter.drawText(
-                bubble.adjusted(10, 20, -10, -3), Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, when_text
-            )
+            when_box = QRectF(bubble.left() + 10, bubble.top() + 3 + bold_height, width, text_height)
+            painter.drawText(when_box, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, when_text)
         painter.end()
+
+
+class ElidedLabel(QLabel):
+    """A label that ends in "…" when it's squeezed, so a long name never sets its card's
+    narrowest width (a board called "ROG STRIX Z790-A GAMING WIFI" would keep two cards from
+    ever fitting side by side)."""
+
+    def __init__(self, text: str = "", shortest: int = 120, parent: QWidget | None = None) -> None:
+        super().__init__(text, parent)
+        self.shortest = shortest  # px it still shows before it's all "…"
+
+    def minimumSizeHint(self) -> QSize:
+        hint = super().minimumSizeHint()
+        return QSize(min(hint.width(), px(self.shortest)), hint.height())
+
+    def shown_text(self) -> str:
+        return self.fontMetrics().elidedText(self.text(), Qt.TextElideMode.ElideRight, self.contentsRect().width())
+
+    def _sync_tooltip(self) -> None:
+        self.setToolTip(self.text() if self.shown_text() != self.text() else "")  # the whole name, when cut
+
+    def setText(self, text: str) -> None:
+        super().setText(text)
+        self._sync_tooltip()
+
+    def resizeEvent(self, event: QResizeEvent) -> None:
+        super().resizeEvent(event)
+        self._sync_tooltip()
+
+    def paintEvent(self, event: QPaintEvent) -> None:
+        painter = QPainter(self)
+        rect = self.contentsRect()
+        text = self.shown_text()
+        self.style().drawItemText(
+            painter,
+            rect,
+            int(self.alignment() | Qt.AlignmentFlag.AlignVCenter),
+            self.palette(),
+            self.isEnabled(),
+            text,
+            QPalette.ColorRole.WindowText,
+        )
+        painter.end()
+
+
+def expand_icon(color: str) -> QIcon:
+    """Four corners pointing outwards: open something across the whole window."""
+    icon = QIcon()
+    for size in (16, 32):
+        pixmap = QPixmap(size, size)
+        pixmap.fill(Qt.GlobalColor.transparent)
+        painter = QPainter(pixmap)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setPen(QPen(QColor(color), size / 10, Qt.PenStyle.SolidLine, Qt.PenCapStyle.SquareCap))
+        edge, arm = size * 0.12, size * 0.22
+        for x, y, dx, dy in (
+            (edge, edge, 1, 1),
+            (size - edge, edge, -1, 1),
+            (edge, size - edge, 1, -1),
+            (size - edge, size - edge, -1, -1),
+        ):
+            corner = QPointF(x, y)
+            painter.drawLine(corner, QPointF(x + dx * arm, y))
+            painter.drawLine(corner, QPointF(x, y + dy * arm))
+        painter.end()
+        icon.addPixmap(pixmap)
+    return icon
 
 
 def _clock(timestamp: float | None, to_wall: Callable[[float], float]) -> str:
@@ -351,6 +497,7 @@ class DetailPanel(QFrame):
 
     window_changed = Signal(float)
     pin_toggled = Signal(bool)
+    focus_requested = Signal()
 
     WINDOWS = ((60.0, "1 min"), (300.0, "5 min"), (900.0, "15 min"))
     STATS = (
@@ -386,9 +533,9 @@ class DetailPanel(QFrame):
         header = QHBoxLayout()
         titles = QVBoxLayout()
         titles.setSpacing(0)
-        self.title = QLabel("No sensor selected")
+        self.title = ElidedLabel("No sensor selected", shortest=90)
         self.title.setObjectName("detailTitle")
-        self.subtitle = QLabel("")
+        self.subtitle = ElidedLabel("", shortest=90)
         self.subtitle.setObjectName("muted")
         titles.addWidget(self.title)
         titles.addWidget(self.subtitle)
@@ -403,6 +550,13 @@ class DetailPanel(QFrame):
         self.pin_button.setToolTip("Show this sensor's value as its own icon in the system tray")
         self.pin_button.toggled.connect(self._on_pin_toggled)
         header.addWidget(self.pin_button)
+        self.focus_button = QPushButton()  # an icon, so the header still fits the narrowest window
+        self.focus_button.setObjectName("iconButton")
+        self.focus_button.setIcon(expand_icon(current_theme().muted))
+        self.focus_button.setAccessibleName("Focus view")
+        self.focus_button.setToolTip("Focus view: this sensor across the whole window (or double-click any sensor)")
+        self.focus_button.clicked.connect(self.focus_requested)
+        header.addWidget(self.focus_button)
         header.addSpacing(8)
         self.window_buttons = QButtonGroup(self)
         self.window_buttons.setExclusive(True)
@@ -426,7 +580,7 @@ class DetailPanel(QFrame):
         for i, (key, label, tip) in enumerate(self.STATS):
             box = QVBoxLayout()
             box.setSpacing(1)
-            name = QLabel(label)
+            name = QLabel(label.upper())
             name.setObjectName("statLabel")
             name.setToolTip(tip)
             value = QLabel("—")
@@ -443,6 +597,11 @@ class DetailPanel(QFrame):
         self.limits = QLabel("")
         self.limits.setObjectName("muted")
         layout.addWidget(self.limits)
+
+    def paintEvent(self, event: QPaintEvent) -> None:
+        painter = QPainter(self)
+        paint_card(painter, QRectF(self.rect()), current_theme())
+        painter.end()
 
     def _on_pin_toggled(self, pinned: bool) -> None:
         self.pin_button.setText("Pinned to tray" if pinned else "Pin to tray")
@@ -473,6 +632,7 @@ class DetailPanel(QFrame):
         can_pin: bool = True,
     ) -> None:
         self.chart.set_data(row, self.window_seconds, fahrenheit, gap, now, to_wall)
+        self.focus_button.setEnabled(row is not None)
         if row is None:
             self.pin_button.setEnabled(False)
             self.title.setText("No sensor selected")

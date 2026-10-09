@@ -41,7 +41,7 @@ line-length = 120
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "B", "UP", "SIM", "RUF"]
-allowed-confusables = ["−"]  # typographic minus in chart labels
+allowed-confusables = ["−", "–"]  # typographic minus in chart labels, en dash in ranges
 
 [tool.mypy]
 strict = true

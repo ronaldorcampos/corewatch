@@ -35,6 +35,7 @@ class Zone:
     max_range: int | None
     device: str
     previous: tuple[int, float] | None = None
+    integrated: bool = False  # the integrated GPU's zone, filed under its card
 
 
 def _label(name: str) -> str:
@@ -77,7 +78,7 @@ class RaplSource:
                 continue
             max_range = read_int(entry / "max_energy_range_uj")
             if integrated is not None and name == "uncore":
-                self.zones.append(Zone(entry, "Power draw", max_range, integrated.device))
+                self.zones.append(Zone(entry, "Power draw", max_range, integrated.device, integrated=True))
             else:
                 self.zones.append(Zone(entry, _label(name), max_range, self.device))
         self.sample()  # prime the counters
@@ -103,7 +104,12 @@ class RaplSource:
             zone.previous = (energy, now) if energy is not None else None
             readings.append(
                 Reading(
-                    key=f"rapl/{zone.path.name}", device=zone.device, label=zone.label, kind=Kind.POWER, value=value
+                    key=f"rapl/{zone.path.name}",
+                    device=zone.device,
+                    label=zone.label,
+                    kind=Kind.POWER,
+                    value=value,
+                    integrated=zone.integrated,
                 )
             )
         return readings

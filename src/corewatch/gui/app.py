@@ -4,6 +4,7 @@ import contextlib
 import json
 import math
 import os
+import socket
 import sys
 import time
 from collections.abc import Callable
@@ -11,17 +12,33 @@ from dataclasses import replace
 from importlib.resources import files
 from pathlib import Path
 
-from PySide6.QtCore import QByteArray, QObject, QPoint, QSettings, QSignalBlocker, Qt, QThread, QTimer, Signal, Slot
+from PySide6.QtCore import (
+    QByteArray,
+    QObject,
+    QPoint,
+    QRectF,
+    QSettings,
+    QSignalBlocker,
+    Qt,
+    QThread,
+    QTimer,
+    Signal,
+    Slot,
+)
 from PySide6.QtGui import (
     QAction,
     QActionGroup,
     QCloseEvent,
     QColor,
-    QFont,
+    QFontDatabase,
     QGuiApplication,
     QIcon,
+    QKeySequence,
     QPainter,
+    QPaintEvent,
     QPixmap,
+    QResizeEvent,
+    QShortcut,
 )
 from PySide6.QtSvg import QSvgRenderer
 from PySide6.QtWidgets import (
@@ -37,6 +54,7 @@ from PySide6.QtWidgets import (
     QScrollArea,
     QSizePolicy,
     QSplitter,
+    QStackedWidget,
     QSystemTrayIcon,
     QToolBar,
     QToolButton,
@@ -48,10 +66,13 @@ from corewatch import autostart
 from corewatch.cli import MAX_INTERVAL, MIN_INTERVAL
 from corewatch.gui import single
 from corewatch.gui import theme as themes
+from corewatch.gui.cards import CardDeck, ViewData, card_rank, is_wide, view_for
+from corewatch.gui.focus import FocusView
+from corewatch.gui.overview import GaugeStrip, gauge_specs
 from corewatch.gui.sensors import CategorySection
-from corewatch.gui.widgets import DetailPanel
+from corewatch.gui.widgets import DetailPanel, expand_icon
 from corewatch.model import Kind, Row, Status, format_short, format_value
-from corewatch.monitor import Collected, Monitor, gather_fans, group_rows, headline
+from corewatch.monitor import Collected, Monitor, gather_fans, gather_storage, group_rows, headline
 from corewatch.sources import default_sources
 
 # How long closing waits for a reading in flight before giving up on it.
@@ -59,8 +80,8 @@ SHUTDOWN_WAIT_MS = 3000
 
 # Lines at the top of a pinned icon's menu: group, name, min, max, average.
 TRAY_INFO_LINES = 5
-# The logo's size in the toolbar, where the app name used to be.
-LOGO_SIZE = 28
+# The logo's size in the toolbar, beside the app's name.
+LOGO_SIZE = 34
 # Key of corewatch's own tray icon (its logo), which carries the window, reset and quit
 # actions. Pinned sensors get number icons of their own beside it.
 APP_TRAY = ""
@@ -83,6 +104,47 @@ def app_icon() -> QIcon:
 # Desktops whose top panel is dark whatever the light/dark setting.
 DARK_PANEL_DESKTOPS = ("gnome", "unity", "pantheon")
 TRAY_ICON_SIZES = (16, 22, 24, 32, 48, 64)
+
+
+# The settings button's icon: three sliders, drawn square to match the cards' corner marks.
+SETTINGS_SVG = (
+    '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="COLOR" '
+    'stroke-width="1.5" stroke-linecap="square"><path d="M4 6h9M17 6h3M4 12h3M11 12h9M4 18h11M19 18h1"/>'
+    '<rect x="13" y="4" width="4" height="4"/><rect x="7" y="10" width="4" height="4"/>'
+    '<rect x="15" y="16" width="4" height="4"/></svg>'
+)
+
+
+def settings_icon(color: str) -> QIcon:
+    renderer = QSvgRenderer(QByteArray(SETTINGS_SVG.replace("COLOR", color).encode()))
+    icon = QIcon()
+    for size in (20, 40):
+        pixmap = QPixmap(size, size)
+        pixmap.fill(Qt.GlobalColor.transparent)
+        painter = QPainter(pixmap)
+        renderer.render(painter)
+        painter.end()
+        icon.addPixmap(pixmap)
+    return icon
+
+
+def live_text(interval: float, stalled: bool = False) -> str:
+    """The toolbar chip: readings arriving at the interval, or waiting on a slow one."""
+    return "●  WAITING FOR A READING" if stalled else f"●  LIVE · {interval:g} s"
+
+
+def short_host(name: str) -> str:
+    """The computer's name without its domain, so a long one can't crowd the toolbar."""
+    return name.split(".")[0] or name
+
+
+class GridBackground(QWidget):
+    """The window's backdrop: its colour with a faint square grid ruled over it."""
+
+    def paintEvent(self, event: QPaintEvent) -> None:
+        painter = QPainter(self)
+        themes.paint_grid(painter, QRectF(self.rect()), themes.current_theme())
+        painter.end()
 
 
 def panel_is_light(desktop: str, scheme: Qt.ColorScheme) -> bool:
@@ -121,7 +183,7 @@ def number_icon(text: str, status: Status) -> QIcon:
     painter.setBrush(QColor(background))
     painter.setPen(Qt.PenStyle.NoPen)
     painter.drawRoundedRect(0, 0, 64, 64, 14, 14)
-    font = QFont()
+    font = QFontDatabase.systemFont(QFontDatabase.SystemFont.GeneralFont)  # not the app's bundled fonts
     font.setBold(True)
     font.setPixelSize({1: 40, 2: 40, 3: 30, 4: 23}.get(len(text), 19))
     painter.setFont(font)
@@ -133,6 +195,11 @@ def number_icon(text: str, status: Status) -> QIcon:
 
 def temperature_icon(celsius: float | None, status: Status, fahrenheit: bool) -> QIcon:
     return number_icon(format_short(Kind.TEMPERATURE, celsius, fahrenheit), status)
+
+
+def gather_cards(rows: list[Row]) -> list[Row]:
+    """Every fan into the Fans card and every drive into the Storage card."""
+    return gather_storage(gather_fans(rows))
 
 
 def matches(text: str, *fields: str) -> bool:
@@ -185,9 +252,13 @@ class MainWindow(QMainWindow):
         self.show_unused = bool(settings.value("show_unused", False, type=bool))
         self.start_minimized = bool(settings.value("start_minimized", False, type=bool))
         self.show_min_max = bool(settings.value("show_min_max", True, type=bool))
+        self.show_host = bool(settings.value("show_host", True, type=bool))
         collapsed = settings.value("collapsed", [], type=list)
         self.collapsed: set[str] = {str(d) for d in collapsed} if isinstance(collapsed, list) else set()
+        # Cards showing their full list as well as their compact view ("All sensors").
+        self.expanded: set[str] = set(self._load_list("expanded_cards"))
         self.selected_key: str | None = str(settings.value("selected", "")) or None
+        self.focus_key: str | None = None  # the sensor in the focus view, while it's open
         self.pinned: list[str] = self._load_list("pinned")
         self.names: dict[str, str] = self._load_names()
 
@@ -198,6 +269,7 @@ class MainWindow(QMainWindow):
         self._devices: list[str] = []
         self.sections: dict[str, CategorySection] = {}
         self.gap = 5.0
+        self._interval_set_at = 0.0
         self.raw_rows: list[Row] = []
         self._tray_factory: Callable[[], QSystemTrayIcon] | None = None
         self._tray_menus: dict[str, QMenu] = {}
@@ -210,6 +282,7 @@ class MainWindow(QMainWindow):
         self.setWindowIcon(app_icon())
         self.timer = QTimer(self)
         self.timer.timeout.connect(self._request_sample)
+        self.timer.timeout.connect(self._update_live)
         self._sampling = False
         self._stopped = False
         self.worker_stuck = False
@@ -235,7 +308,7 @@ class MainWindow(QMainWindow):
     # ----- layout -------------------------------------------------------------------
 
     def _build_ui(self) -> None:
-        toolbar = QToolBar("Controls", self)
+        toolbar = self.toolbar = QToolBar("Controls", self)
         toolbar.setMovable(False)
         toolbar.setFloatable(False)
         toolbar.toggleViewAction().setVisible(False)
@@ -247,21 +320,39 @@ class MainWindow(QMainWindow):
         self.logo.setToolTip("corewatch")
         self.logo.setAccessibleName("corewatch")
         toolbar.addWidget(self.logo)
+        brand = self.brand = QWidget()
+        brand_layout = QVBoxLayout(brand)
+        brand_layout.setContentsMargins(4, 0, 6, 0)
+        brand_layout.setSpacing(0)
+        wordmark = QLabel("COREWATCH")
+        wordmark.setObjectName("wordmark")
+        brand_layout.addWidget(wordmark)
+        self.host_label = QLabel(f"HOST {short_host(socket.gethostname()).upper()}")
+        self.host_label.setObjectName("hostLabel")
+        self.host_label.setVisible(self.show_host)
+        brand_layout.addWidget(self.host_label)
+        self.brand_action = toolbar.addWidget(brand)
+        self.live_chip = QLabel(live_text(self.interval))
+        self.live_chip.setObjectName("liveChip")
+        self.live_chip.setToolTip("Readings refresh at this interval")
+        self.live_chip_action = toolbar.addWidget(self.live_chip)
+
+        spacer = QWidget()
+        spacer.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        toolbar.addWidget(spacer)
+
         self.filter = QLineEdit()
         self.filter.setPlaceholderText("Filter sensors  (Ctrl+F)")
         self.filter.setClearButtonEnabled(True)
         self.filter.setMinimumWidth(240)
         self.filter.textChanged.connect(lambda _: self._apply_filter())
+        self.filter.textChanged.connect(lambda _: self.close_focus())  # a search is for every sensor
         self._filter_folds: dict[str, bool] = {}
         toolbar.addWidget(self.filter)
         focus_filter = QAction(self)
         focus_filter.setShortcut("Ctrl+F")
         focus_filter.triggered.connect(lambda: self.filter.setFocus())
         self.addAction(focus_filter)
-
-        spacer = QWidget()
-        spacer.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
-        toolbar.addWidget(spacer)
 
         every = QLabel("Every")
         every.setObjectName("muted")
@@ -280,6 +371,7 @@ class MainWindow(QMainWindow):
         self.celsius_button = QPushButton("°C")
         self.fahrenheit_button = QPushButton("°F")
         for button, is_f in ((self.celsius_button, False), (self.fahrenheit_button, True)):
+            button.setObjectName("unit")
             button.setCheckable(True)
             button.setChecked(is_f == self.fahrenheit)
             button.setToolTip("Show temperatures in " + ("Fahrenheit" if is_f else "Celsius"))
@@ -287,31 +379,26 @@ class MainWindow(QMainWindow):
             self.unit_buttons.addButton(button)
             toolbar.addWidget(button)
 
-        self.min_max_button = QPushButton("Min / max")
-        self.min_max_button.setCheckable(True)
-        self.min_max_button.setChecked(self.show_min_max)
-        self.min_max_button.setToolTip("Show the lowest and highest value of each sensor in the list")
-        self.min_max_button.toggled.connect(self.set_show_min_max)
-        toolbar.addWidget(self.min_max_button)
-
-        self.reset_button = QPushButton("Reset min/max")
-        self.reset_button.setToolTip("Forget every recorded lowest, highest and average value (Ctrl+R)")
-        self.reset_button.setShortcut("Ctrl+R")
-        self.reset_button.clicked.connect(self.reset_stats)
-        toolbar.addWidget(self.reset_button)
-
         self._make_option_actions()
-        self.menu_button = QToolButton()
-        self.menu_button.setText("⋯")
-        self.menu_button.setToolTip("Options")
-        self.menu_button.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
-        menu = QMenu(self.menu_button)
+        # Every option, Reset min/max first, behind one button at the far right; the same list
+        # as the tray icon's menu.
+        self.settings_button = QToolButton()
+        self.settings_button.setObjectName("settings")
+        self.settings_button.setToolTip("Settings")
+        self.settings_button.setAccessibleName("Settings")
+        self.settings_button.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        menu = QMenu(self.settings_button)
+        self._add_display_options(menu)
         self._add_options(menu)
-        self.addAction(self.quit_action)
-        self.menu_button.setMenu(menu)
-        toolbar.addWidget(self.menu_button)
+        self.addAction(self.quit_action)  # its shortcut works anywhere in the window
+        # Ctrl+R is a window shortcut rather than the action's, so the tray menu, where it can't
+        # work, doesn't show it.
+        self.reset_shortcut = QShortcut(QKeySequence("Ctrl+R"), self)
+        self.reset_shortcut.activated.connect(self.reset_action.trigger)
+        self.settings_button.setMenu(menu)
+        toolbar.addWidget(self.settings_button)
 
-        central = QWidget()
+        central = GridBackground()
         central.setObjectName("central")
         layout = QVBoxLayout(central)
         layout.setContentsMargins(12, 4, 12, 0)
@@ -331,10 +418,16 @@ class MainWindow(QMainWindow):
         self.list_area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         container = QWidget()
         container.setObjectName("listContainer")
-        self.sections_layout = QVBoxLayout(container)
-        self.sections_layout.setContentsMargins(0, 0, 4, 0)
-        self.sections_layout.setSpacing(12)
-        self.sections_layout.addStretch(1)
+        page = QVBoxLayout(container)
+        page.setContentsMargins(0, 0, 4, 0)
+        page.setSpacing(12)
+        self.gauges = GaugeStrip()
+        self.gauges.selected.connect(self._select)
+        self.gauges.opened.connect(self.open_focus)
+        page.addWidget(self.gauges)
+        self.deck = CardDeck()
+        page.addWidget(self.deck)
+        page.addStretch(1)
         self.list_area.setWidget(container)
 
         self.detail = DetailPanel()
@@ -344,6 +437,7 @@ class MainWindow(QMainWindow):
         with contextlib.suppress(ValueError):
             self.detail.set_window(self.detail.nearest_window(float(str(stored_window))))
         self.detail.window_changed.connect(lambda seconds: self.settings.setValue("detail_window", seconds))
+        self.detail.focus_requested.connect(self._focus_selected)
 
         self.splitter = QSplitter(Qt.Orientation.Vertical)
         self.splitter.addWidget(self.list_area)
@@ -351,15 +445,34 @@ class MainWindow(QMainWindow):
         self.splitter.setChildrenCollapsible(False)
         self.splitter.setHandleWidth(10)
         self.splitter.setSizes([520, 360])
-        layout.addWidget(self.splitter, 1)
+
+        # One sensor across the whole window, in place of the overview until you go back.
+        self.focus = FocusView()
+        self.focus.back.connect(self.close_focus)
+        self.focus.selected.connect(self.open_focus)  # a core in its strip
+        self.focus.window_changed.connect(self.detail.set_window)  # one window setting for both
+        self.focus.rename_requested.connect(self._rename_interactively)
+        self.focus.pin_toggled.connect(lambda pinned: self.set_pinned(self.focus_key, pinned))
+        # Esc goes back wherever the keyboard is in the window, but only while the focus view is
+        # open: the rest of the time Esc is left to whatever has the keyboard.
+        self.close_focus_shortcut = QShortcut(QKeySequence(Qt.Key.Key_Escape), self)
+        self.close_focus_shortcut.setContext(Qt.ShortcutContext.WindowShortcut)
+        self.close_focus_shortcut.setEnabled(False)
+        self.close_focus_shortcut.activated.connect(self.close_focus)
+
+        self.pages = QStackedWidget()
+        self.pages.addWidget(self.splitter)
+        self.pages.addWidget(self.focus)
+        layout.addWidget(self.pages, 1)
         self.setCentralWidget(central)
 
     def _make_option_actions(self) -> None:
-        """The app's options as actions, shared by the ⋯ menu and the tray menu so both always
-        agree. The toolbar's controls (interval, units, min/max, reset) appear only in the tray."""
+        """The app's options as actions, shared by the settings menu and the tray menu so both
+        always agree. The toolbar's interval and units are offered in both menus too."""
         self.open_action = QAction("Open corewatch", self)
         self.open_action.triggered.connect(self.show_window)
         self.reset_action = QAction("Reset min/max", self)
+        self.reset_action.setToolTip("Forget every recorded lowest, highest and average value (Ctrl+R)")
         self.reset_action.triggered.connect(self.reset_stats)
 
         self.interval_actions = QActionGroup(self)
@@ -405,6 +518,11 @@ class MainWindow(QMainWindow):
         self.expand_action.triggered.connect(self._expand_all)
         self.collapse_action = QAction("Collapse all", self)
         self.collapse_action.triggered.connect(self._collapse_all)
+        self.host_action = QAction("Show this computer's name", self)
+        self.host_action.setCheckable(True)
+        self.host_action.setChecked(self.show_host)
+        self.host_action.setToolTip("Show the computer's name under corewatch's, at the top left")
+        self.host_action.toggled.connect(self.set_show_host)
         self.tray_action = QAction("Keep running in the tray when closed", self)
         self.tray_action.setCheckable(True)
         self.tray_action.setChecked(self.close_to_tray)
@@ -426,11 +544,20 @@ class MainWindow(QMainWindow):
         self.quit_action.setShortcut("Ctrl+Q")
         self.quit_action.triggered.connect(self.quit)
 
+    def _add_display_options(self, menu: QMenu) -> None:
+        """Reset min/max and the display choices: the top of the settings and tray menus."""
+        menu.addAction(self.reset_action)
+        menu.addSeparator()
+        menu.addMenu("Update every").addActions(self.interval_actions.actions())
+        menu.addMenu("Temperatures in").addActions(self.unit_actions.actions())
+        menu.addAction(self.min_max_action)
+        menu.addSeparator()
+
     def _add_options(self, menu: QMenu) -> None:
-        """The options shared by the ⋯ menu and the tray menu, from theme down to Quit."""
+        """The options shared by the settings menu and the tray menu, from theme down to Quit."""
         theme_menu = menu.addMenu("Theme")
         theme_menu.addActions(self.theme_actions.actions())
-        menu.addActions([self.unused_action, self.expand_action, self.collapse_action])
+        menu.addActions([self.unused_action, self.expand_action, self.collapse_action, self.host_action])
         menu.addSeparator()
         menu.addActions([self.tray_action, self.autostart_action, self.minimized_action])
         menu.addSeparator()
@@ -453,6 +580,9 @@ class MainWindow(QMainWindow):
         self.timer.start(round(self.interval * 1000))
         # A sample is "missing" (draw a gap) only if it is well overdue.
         self.gap = self.interval * 3 + 1
+        if self.live_chip.property("stalled") is not True:  # a stall stays one whatever the interval
+            self._interval_set_at = self.monitor.clock()  # but a shorter interval isn't overdue already
+        self._update_live()
         if remember:
             self.settings.setValue("interval", self.interval)
 
@@ -460,12 +590,11 @@ class MainWindow(QMainWindow):
         self.show_unused = show
         self.settings.setValue("show_unused", show)
         self.ordered = self.monitor.visible_rows(self.all_rows, show)
-        self.plain_ordered = self.monitor.visible_rows(gather_fans(self.raw_rows), show)
+        self.plain_ordered = self.monitor.visible_rows(gather_cards(self.raw_rows), show)
         self.redraw()
 
     def set_show_min_max(self, show: bool) -> None:
         self.show_min_max = show
-        self.min_max_button.setChecked(show)
         self.min_max_action.setChecked(show)
         self.settings.setValue("show_min_max", show)
         for section in self.sections.values():
@@ -489,8 +618,11 @@ class MainWindow(QMainWindow):
 
     def _restyle(self) -> None:
         app = QApplication.instance()
+        theme = themes.current_theme()
         if isinstance(app, QApplication):
-            themes.apply(app, themes.current_theme())
+            themes.apply(app, theme)
+        self.settings_button.setIcon(settings_icon(theme.muted))
+        self.detail.focus_button.setIcon(expand_icon(theme.muted))
         self.redraw()
 
     def _sync_autostart(self) -> None:
@@ -569,6 +701,50 @@ class MainWindow(QMainWindow):
             else "Needs a system tray, and this desktop doesn't have one right now"
         )
 
+    def set_show_host(self, show: bool) -> None:
+        self.show_host = show
+        self.host_action.setChecked(show)
+        self.settings.setValue("show_host", show)
+        self.host_label.setVisible(show)
+        self._fit_toolbar()
+
+    def _update_live(self) -> None:
+        """LIVE while readings arrive; WAITING (amber) once one is well overdue, say a hung driver."""
+        last = self.monitor.last_sample_at
+        stalled = last is not None and self.monitor.clock() - max(last, self._interval_set_at) > self.gap
+        text = live_text(self.interval, stalled)
+        if self.live_chip.property("stalled") != stalled:
+            self.live_chip.setProperty("stalled", stalled)
+            self.live_chip.style().unpolish(self.live_chip)
+            self.live_chip.style().polish(self.live_chip)
+        if text != self.live_chip.text():
+            self.live_chip.setText(text)
+            self._fit_toolbar()  # WAITING is much wider than LIVE
+
+    def _fit_toolbar(self) -> None:
+        """In a narrow window, drop the name block and the LIVE chip before the toolbar would push
+        the settings button, the only way to the options, into its overflow menu."""
+        layout = self.toolbar.layout()
+        spacing = layout.spacing() if layout is not None else 0
+        chip = self.live_chip.sizeHint().width() + spacing
+        brand = self.brand.sizeHint().width() + spacing
+        rest = self.toolbar.sizeHint().width()  # what the toolbar needs without either
+        rest -= chip if self.live_chip_action.isVisible() else 0
+        rest -= brand if self.brand_action.isVisible() else 0
+        room = self.toolbar.width()
+        # Work it out rather than showing both and measuring, which relayouts the toolbar twice
+        # on every resize of a narrow window; a toolbar that still overflows sheds more below.
+        self.live_chip_action.setVisible(rest + brand + chip <= room)
+        self.brand_action.setVisible(rest + brand <= room)
+        if self.toolbar.sizeHint().width() > room:
+            self.live_chip_action.setVisible(False)
+        if self.toolbar.sizeHint().width() > room:
+            self.brand_action.setVisible(False)
+
+    def resizeEvent(self, event: QResizeEvent) -> None:
+        super().resizeEvent(event)
+        self._fit_toolbar()
+
     def _set_close_to_tray(self, enabled: bool) -> None:
         self.close_to_tray = enabled
         self.settings.setValue("close_to_tray", enabled)
@@ -586,6 +762,14 @@ class MainWindow(QMainWindow):
         else:
             self.collapsed.discard(device)
         self.settings.setValue("collapsed", sorted(self.collapsed))
+
+    def _remember_table(self, device: str, shown: bool) -> None:
+        if shown:
+            self.expanded.add(device)
+        else:
+            self.expanded.discard(device)
+        self.settings.setValue("expanded_cards", json.dumps(sorted(self.expanded)))
+        self.redraw()  # the card's width needs changed
 
     def _expand_all(self) -> None:
         for device, section in self.sections.items():
@@ -631,7 +815,7 @@ class MainWindow(QMainWindow):
         self.ordered = self.monitor.visible_rows(rows, self.show_unused)
         # The same rows under their original names: what headline() and the tray summary look
         # for ("CPU package", "CPU load") must not depend on what you've renamed them to.
-        self.plain_ordered = self.monitor.visible_rows(gather_fans(raw), self.show_unused)
+        self.plain_ordered = self.monitor.visible_rows(gather_cards(raw), self.show_unused)
         notes = self.monitor.notes()
         self.notes.setText("\n".join(f"•  {note}" for note in notes))
         self.notes.setVisible(bool(notes))
@@ -641,20 +825,38 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(
             f"{len(self.ordered)} sensors{hidden}  ·  updated {time.strftime('%H:%M:%S')}  ·  every {self.interval:g} s"
         )
+        self._update_live()
 
     def redraw(self) -> None:
         text = self.filter.text()
         filtering = bool(text.strip())
-        groups = [
-            (device, [r for r in rows if matches(text, device, r.reading.label)])
-            for device, rows in group_rows(self.ordered)
-        ]
+        groups = sorted(
+            (
+                (device, [r for r in rows if matches(text, device, r.reading.label)])
+                for device, rows in group_rows(self.ordered)
+            ),
+            key=lambda group: card_rank(group[0]),  # wide cards first; sorted() keeps the rest in order
+        )
         devices = [device for device, _ in groups]
         if devices != self._devices:
             self._rebuild(devices)
         now = self.monitor.last_sample_at or self.monitor.clock()
+        # The overview reads the sensors under their original names, so renames don't hide them,
+        # and steps aside while filtering.
+        self.gauges.set_wanted(not filtering)
+        self.gauges.set_specs(gauge_specs(self.plain_ordered, self.fahrenheit))
+        labels = {key: row.reading.label for key, row in self.rows.items()}
         for device, rows in groups:
             section = self.sections[device]
+            data = ViewData(
+                [r for r in self.plain_ordered if r.reading.device == device],
+                self.plain_ordered,
+                labels,
+                self.fahrenheit,
+                now,
+                self.gap,
+            )
+            section.set_view_data(data, filtering)
             section.setVisible(bool(rows))
             # While filtering, open every matching card without touching the remembered state.
             if filtering:
@@ -663,11 +865,17 @@ class MainWindow(QMainWindow):
             else:
                 section.set_collapsed(device in self.collapsed)
             section.set_rows(rows, now, self.fahrenheit, self.gap)
+            # Beside another card, it needs room for its compact view, or for its list when shown.
+            need = themes.px(CardDeck.MIN_HALF)
+            if section.table_shown():
+                need = max(need, section.grid.cell_min_width() + 28)  # 28: the card's side margins
+            self.deck.set_need(section, need)
+        self.deck.reflow()  # cards with no match while filtering leave no hole
         if self.selected_key not in {row.reading.key for row in self.ordered}:  # gone, or now hidden
             best = headline(self.plain_ordered)
             self.selected_key = best.reading.key if best else next(iter(self.rows), None)
         for section in self.sections.values():
-            section.grid.set_selected(self.selected_key)
+            section.set_selected(self.selected_key)
         self._show_detail()
         self._update_tray()
 
@@ -676,16 +884,23 @@ class MainWindow(QMainWindow):
         for device in list(self.sections):
             if device not in devices:
                 self.sections.pop(device).deleteLater()
-        for index, device in enumerate(devices):
+        for device in devices:
             section = self.sections.get(device)
             if section is None:
-                section = CategorySection(device, device in self.collapsed)
+                section = CategorySection(
+                    device, device in self.collapsed, view=view_for(device), show_table=device in self.expanded
+                )
                 section.collapse_toggled.connect(self._on_fold)
+                section.table_toggled.connect(self._remember_table)
                 section.grid.selected.connect(self._select)
+                section.grid.opened.connect(self.open_focus)
+                if section.view is not None:
+                    section.view.selected.connect(self._select)
+                    section.view.opened.connect(self.open_focus)
                 section.grid.context_requested.connect(self._show_sensor_menu)
                 section.grid.set_show_min_max(self.show_min_max)
                 self.sections[device] = section
-            self.sections_layout.insertWidget(index, section)
+        self.deck.set_cards([(self.sections[device], is_wide(device)) for device in devices])
         self._devices = devices
 
     def _apply_filter(self) -> None:
@@ -697,7 +912,7 @@ class MainWindow(QMainWindow):
         self.selected_key = key
         self.settings.setValue("selected", key)
         for section in self.sections.values():
-            section.grid.set_selected(key)
+            section.set_selected(key)
         self._show_detail()
 
     def _show_detail(self) -> None:
@@ -706,6 +921,60 @@ class MainWindow(QMainWindow):
         pinned = self.selected_key in self.pinned
         can_pin = self._tray_factory is not None
         self.detail.show_row(row, now, self.fahrenheit, self.gap, self.monitor.to_wall, pinned, can_pin)
+        self._show_focus()
+
+    # ----- focus view -----------------------------------------------------------------
+
+    def open_focus(self, key: str) -> None:
+        """Show sensor ``key`` across the whole window (it's selected in the overview too)."""
+        if key not in self.rows:
+            return
+        self.focus_key = key
+        self.close_focus_shortcut.setEnabled(True)
+        self._select(key)
+        if self.pages.currentWidget() is not self.focus:
+            self.pages.setCurrentWidget(self.focus)
+            self.focus.back_button.setFocus(Qt.FocusReason.OtherFocusReason)  # so Esc goes back
+
+    def _focus_selected(self) -> None:
+        if self.selected_key is not None:
+            self.open_focus(self.selected_key)
+
+    def close_focus(self) -> None:
+        if self.focus_key is None:
+            return
+        self.focus_key = None
+        self.close_focus_shortcut.setEnabled(False)
+        self.pages.setCurrentWidget(self.splitter)
+
+    def _show_focus(self) -> None:
+        if self.focus_key is None:
+            return
+        row = self.rows.get(self.focus_key)
+        shown = row is not None and any(r.reading.key == self.focus_key for r in self.ordered)
+        if row is None or not shown:  # it stopped reporting, or is hidden now: back to every sensor
+            self.close_focus()
+            return
+        device = row.reading.origin or row.reading.device
+        self.focus.set_window(self.detail.window_seconds)  # the detail panel holds the setting
+        cores = None
+        if device.startswith("CPU"):
+            labels = {key: r.reading.label for key, r in self.rows.items()}
+            plain = [r for r in self.plain_ordered if (r.reading.origin or r.reading.device) == device]
+            cores = ViewData(plain, self.plain_ordered, labels, self.fahrenheit, self._now(), self.gap)
+        self.focus.show_row(
+            row,
+            cores,
+            self._now(),
+            self.fahrenheit,
+            self.gap,
+            self.monitor.to_wall,
+            self.focus_key in self.pinned,
+            self._tray_factory is not None,
+        )
+
+    def _now(self) -> float:
+        return self.monitor.last_sample_at or self.monitor.clock()
 
     # ----- tray & lifecycle -----------------------------------------------------------
 
@@ -820,11 +1089,7 @@ class MainWindow(QMainWindow):
             # Ubuntu's panel opens this menu on a click, so opening the window has to be here.
             menu.addAction(self.open_action)
             menu.addSeparator()
-            menu.addAction(self.reset_action)
-            menu.addMenu("Update every").addActions(self.interval_actions.actions())
-            menu.addMenu("Temperatures in").addActions(self.unit_actions.actions())
-            menu.addAction(self.min_max_action)
-            menu.addSeparator()
+            self._add_display_options(menu)
             self._add_options(menu)
             return menu
         # Ubuntu's panel shows no tooltips, so the name, min, max and average are also
@@ -898,7 +1163,7 @@ class MainWindow(QMainWindow):
 
     def _present(self, rows: list[Row]) -> list[Row]:
         """Rows as shown: every fan in the Fans card, and your own names applied."""
-        presented = gather_fans(rows)
+        presented = gather_cards(rows)
         if not self.names:
             return presented
         return [
@@ -979,6 +1244,7 @@ def run_gui(
     app.setDesktopFileName("corewatch")
     app.setWindowIcon(app_icon())
     app.setStyle("Fusion")
+    themes.load_fonts()
     app.setQuitOnLastWindowClosed(False)  # the tray may keep us alive; quitting is explicit
     # Read now: once the window applies a chosen theme, the hint reports that instead.
     light_panel = panel_is_light(os.environ.get("XDG_CURRENT_DESKTOP", ""), app.styleHints().colorScheme())
