@@ -1,36 +1,47 @@
 Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
 Upstream-Name: corewatch
 Source: https://github.com/ronaldorcampos/corewatch
+Comment: Files paragraphs run from the general to the specific: the last one that matches a
+ file is the one that applies to it.
 
 Files: *
 Copyright: 2026 Ronaldo Campos
 License: MIT
 
-Files: opt/corewatch/python/lib/python3*/site-packages/corewatch/assets/fonts/*
-Copyright: The Chakra Petch, IBM Plex Sans and JetBrains Mono authors
-License: OFL-1.1
- The license text is beside each font, in its *-OFL.txt.
-
 Files: opt/corewatch/python/*
 Copyright: Python Software Foundation
 License: PSF-2.0
- Python, as built by python-build-standalone. The license text, with those of
- the libraries it is built with, is in opt/corewatch/python/lib/python3*/LICENSE.txt
- and the share/ directory beside it.
+ Python 3.13, as built by python-build-standalone
+ (https://github.com/astral-sh/python-build-standalone). Its license text is in
+ opt/corewatch/python/lib/python3.13/LICENSE.txt.
 
-Files: opt/corewatch/python/lib/python3*/site-packages/PySide6/*
-       opt/corewatch/python/lib/python3*/site-packages/shiboken6/*
+Files: opt/corewatch/python/lib/python3.13/site-packages/*
+Copyright: The authors of each package
+License: MIT and BSD-2-Clause and BSD-3-Clause and PSF-2.0
+ MIT: textual, rich, markdown-it-py, mdit-py-plugins, mdurl, linkify-it-py and
+ platformdirs. BSD-2-Clause: pygments. BSD-3-Clause: nvidia-ml-py. PSF-2.0:
+ typing-extensions. Each package's own license, where it ships one, is in its
+ *.dist-info directory.
+
+Files: opt/corewatch/python/lib/python3.13/site-packages/PySide6/*
+       opt/corewatch/python/lib/python3.13/site-packages/shiboken6/*
 Copyright: The Qt Company Ltd.
 License: LGPL-3.0-only
- Qt for Python (PySide6 Essentials) and the Qt libraries it carries. Their
- license texts are in the packages' *.dist-info directories.
+ Qt for Python (PySide6 Essentials 6.12) and the Qt libraries it carries,
+ available under LGPL-3.0-only, GPL-2.0-only or GPL-3.0-only; this package uses
+ them under the LGPL. On Debian systems the full text of the GNU Lesser General
+ Public License version 3 is in /usr/share/common-licenses/LGPL-3, and the GNU
+ General Public License version 3 it builds on in /usr/share/common-licenses/GPL-3.
+ The source of Qt and Qt for Python is at https://code.qt.io.
 
-Files: opt/corewatch/python/lib/python3*/site-packages/*
-Copyright: The authors of each package
-License: various (MIT, BSD-3-Clause, BSD-2-Clause, Apache-2.0)
- textual, rich, pygments, markdown-it-py, mdit-py-plugins, mdurl, linkify-it-py,
- platformdirs, typing-extensions and nvidia-ml-py. Each package's license is in
- its *.dist-info directory.
+Files: opt/corewatch/python/lib/python3.13/site-packages/corewatch/*
+Copyright: 2026 Ronaldo Campos
+License: MIT
+
+Files: opt/corewatch/python/lib/python3.13/site-packages/corewatch/assets/fonts/*
+Copyright: The Chakra Petch, IBM Plex Sans and JetBrains Mono authors
+License: OFL-1.1
+ The license text is beside each font, in its *-OFL.txt.
 
 License: MIT
  Permission is hereby granted, free of charge, to any person obtaining a copy

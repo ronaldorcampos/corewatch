@@ -6,19 +6,32 @@ on:
     tags: ["v*"]
 
 permissions:
-  contents: write  # to create the release and upload to it
+  contents: read
 
 jobs:
+  # The same lint, types and tests as every push: a tag on a commit that fails them publishes nothing.
+  checks:
+    uses: ./.github/workflows/ci.yml
+
   deb:
     name: Debian package
+    needs: checks
+    permissions:
+      contents: write  # to create the release and upload to it
     # The oldest Ubuntu the package is for: its Depends names the libraries as this release
     # packages them (the t64 names), which later releases keep.
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
+        with:
+          persist-credentials: false  # the build runs code from PyPI; it gets no token to push with
 
-      # setup-uv publishes only exact versions (no floating v10 tag), so pin one.
+      # setup-uv publishes only exact versions (no floating v10 tag), so pin one. uv itself is
+      # pinned too, inside pyproject's uv_build range, so the build backend isn't fetched from PyPI
+      # and a release builds the same way each time.
       - uses: astral-sh/setup-uv@v10.2.0
+        with:
+          version: "0.11.8"
 
       - name: The tag matches the version in pyproject.toml
         run: |

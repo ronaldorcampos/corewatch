@@ -1,7 +1,10 @@
 #!/bin/sh
 # Compile corewatch's Python where it now lives, so it starts fast and its tracebacks name real
-# paths. prerm removes what this writes, which dpkg doesn't track.
+# paths. Also after a failed upgrade or removal: the old prerm has already deleted the bytecode by
+# then. prerm removes what this writes, which dpkg doesn't track.
 set -e
-if [ "$1" = configure ]; then
-    /opt/corewatch/python/bin/python3 -m compileall -q -j 0 /opt/corewatch/python/lib > /dev/null || true
-fi
+case "$1" in
+    configure | abort-upgrade | abort-remove | abort-deconfigure)
+        /opt/corewatch/python/bin/python3 -I -m compileall -q -j 0 /opt/corewatch/python/lib > /dev/null || true
+        ;;
+esac

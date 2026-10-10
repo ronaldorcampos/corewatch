@@ -1594,7 +1594,9 @@ class MainWindow(QMainWindow):
 def run_gui(
     interval: float | None = None, fahrenheit: bool | None = None, minimized: bool = False, at_login: bool = False
 ) -> int:
-    app = QApplication(sys.argv)
+    # "corewatch" for argv[0]: started as python3 -m corewatch (the .deb), it would be __main__.py,
+    # which X11 window managers would take as the app's name.
+    app = QApplication(["corewatch", *sys.argv[1:]])
     app.setApplicationName("corewatch")
     app.setOrganizationName("corewatch")
     app.setDesktopFileName("corewatch")

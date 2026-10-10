@@ -8,6 +8,8 @@ on:
   # ("synchronize"); a push carrying several commits is tested at its newest one.
   pull_request:
     types: [opened, synchronize, reopened]
+  # The release workflow runs these checks before it builds a package.
+  workflow_call:
 
 permissions:
   contents: read

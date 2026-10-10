@@ -1,6 +1,7 @@
 #!/bin/sh
 # Remove the bytecode postinst compiled, so removing the package leaves no /opt/corewatch behind.
+# Never fails: stray bytecode isn't worth blocking a removal or an upgrade over.
 set -e
 if [ -d /opt/corewatch ]; then
-    find /opt/corewatch -name __pycache__ -type d -prune -exec rm -rf {} +
+    find /opt/corewatch -name __pycache__ -type d -prune -exec rm -rf {} + || true
 fi

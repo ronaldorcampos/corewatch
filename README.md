@@ -173,9 +173,23 @@ sudo apt install ./corewatch_*_amd64.deb
 ```
 
 That gives you the `corewatch` command, its launcher entry and icon. The package carries its own
-Python and Qt under `/opt/corewatch`, so it doesn't touch, or depend on, the system's Python.
-`sudo apt remove corewatch` takes it all away again. To build the package yourself from a clone,
-run `packaging/deb/build.sh` (it needs uv and `dpkg-deb`); it writes it to `dist/`.
+Python and Qt under `/opt/corewatch`, and runs them isolated, so it doesn't touch, or depend on,
+the system's Python or yours.
+
+If you had installed corewatch with uv before, remove that copy and its launcher entry, or they
+go on standing in for the package's:
+
+```bash
+uv tool uninstall corewatch; rm -f ~/.local/share/applications/corewatch.desktop ~/.local/share/icons/hicolor/scalable/apps/corewatch.svg
+```
+
+`sudo apt remove corewatch` removes the package. What it doesn't know about stays: your settings
+in `~/.config/corewatch`, and the login entry if you turned on **Start when I log in** (turn it off
+before removing, or delete `~/.config/autostart/corewatch.desktop`), and the CPU power rule if you
+copied it into place (`sudo rm /etc/udev/rules.d/99-corewatch-rapl.rules`).
+
+To build the package yourself from a clone, run `packaging/deb/build.sh` (it needs uv,
+`dpkg-deb`, and `readelf` from binutils); it writes it to `dist/`.
 
 ### Anywhere else, with uv
 
