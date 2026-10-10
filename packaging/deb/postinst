@@ -1,0 +1,7 @@
+#!/bin/sh
+# Compile corewatch's Python where it now lives, so it starts fast and its tracebacks name real
+# paths. prerm removes what this writes, which dpkg doesn't track.
+set -e
+if [ "$1" = configure ]; then
+    /opt/corewatch/python/bin/python3 -m compileall -q -j 0 /opt/corewatch/python/lib > /dev/null || true
+fi

@@ -11,7 +11,7 @@ license-files = ["LICENSE"]
 readme = "README.md"
 dependencies = [
     "nvidia-ml-py>=13.615.71",
-    "pyside6>=6.11.2",
+    "pyside6-essentials>=6.11.2",
     "textual>=8.2.8",
 ]
 

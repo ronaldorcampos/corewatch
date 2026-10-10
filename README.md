@@ -162,6 +162,23 @@ not yet been tried on real AMD hardware. If you have a Ryzen or Radeon, the outp
 
 ## Install
 
+### Ubuntu and Debian
+
+Download the `.deb` from the [latest release](https://github.com/ronaldorcampos/corewatch/releases/latest)
+(64-bit PCs; Ubuntu 24.04, Debian 13 or newer) and install it with apt, which also installs the
+system libraries it needs:
+
+```bash
+sudo apt install ./corewatch_*_amd64.deb
+```
+
+That gives you the `corewatch` command, its launcher entry and icon. The package carries its own
+Python and Qt under `/opt/corewatch`, so it doesn't touch, or depend on, the system's Python.
+`sudo apt remove corewatch` takes it all away again. To build the package yourself from a clone,
+run `packaging/deb/build.sh` (it needs uv and `dpkg-deb`); it writes it to `dist/`.
+
+### Anywhere else, with uv
+
 You need Linux with glibc 2.34 or newer (Ubuntu 22.04, Debian 12, Fedora 35 or later; the Qt
 toolkit's wheels require it), [uv](https://docs.astral.sh/uv/), and Python 3.13 (uv fetches it if
 needed). The NVIDIA driver is optional; without it the GPU card simply doesn't appear.
@@ -262,7 +279,9 @@ to make them readable anyway. Install the udev rule, then apply it without reboo
 curl -fsSL https://raw.githubusercontent.com/ronaldorcampos/corewatch/main/packaging/99-corewatch-rapl.rules | sudo tee /etc/udev/rules.d/99-corewatch-rapl.rules > /dev/null
 ```
 
-(From a clone, `sudo cp packaging/99-corewatch-rapl.rules /etc/udev/rules.d/` does the same.)
+(From a clone, `sudo cp packaging/99-corewatch-rapl.rules /etc/udev/rules.d/` does the same. The
+`.deb` carries the rule without turning it on: `sudo cp /usr/share/corewatch/99-corewatch-rapl.rules
+/etc/udev/rules.d/`.)
 
 ```bash
 sudo udevadm trigger --subsystem-match=powercap --action=add
