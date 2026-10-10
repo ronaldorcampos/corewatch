@@ -31,6 +31,13 @@ load and power reading your machine exposes, refreshes them at an interval you c
   gathers every fan from the motherboard and the GPU, and a **Storage** card with every drive (the
   detail drawer still names the device each sensor belongs to). The CPU and GPU cards span the
   window; the rest sit two to a line when the window is wide enough.
+- **Your own layout.** Settings → **Edit layout…** lets you rearrange the overview: drag a panel
+  (the gauges or any card) by its handle, or move it with its arrows; make it half or the whole
+  width; or hide it with its eye button. Hidden panels wait in a list under the cards, each with a
+  button to show it again (including one whose device isn't connected right now), and stay hidden
+  while you filter. **Reset layout** puts everything back, and **Done** or Esc finishes. The layout
+  is remembered: a device you unplug comes back where it was, and one that's new takes its usual
+  place.
 - **Each card opens on a view made for its device:**
   - **CPU:** the heat map, with tiles for package and cores power, the fastest clock, load, the
     hottest core and Vcore (where the board's chip or zenpower reports it).
@@ -45,9 +52,14 @@ load and power reading your machine exposes, refreshes them at an interval you c
   **All sensors** in a card's header shows its full list under the view, and corewatch remembers
   which cards you left open that way. The GPU card, and any card with nothing for a view, is its
   full list. While you filter, every card lists just the sensors that match.
-- **The full list** groups a card's sensors under Temperatures, Load, Clocks, Power, Fan speed,
-  Fan control, Voltages and Traffic, in two columns. Each row has a 60-second sparkline, the
-  current value, min, max and average.
+- **The full list** shows each sensor like the Storage and Fans cards do: its name and value, a
+  bar, and a line with its min, max and average and any limits. The bar fills against what the
+  sensor can reach: 90 °C for a temperature (more if its limits are higher, with a mark where it
+  starts to warn), 100 % for load, the top clock for a clock, the limit for power. A sensor with
+  nothing like that, a voltage say, shows its last 60 seconds there instead. Sensors are sorted
+  by kind, in two columns on a full-width card and one on a half-width card. The Fans card's list
+  uses the ten-step bars of its view for every row: a fan's speed lights as far as its control is
+  set, and turns amber when it's driven hard.
 - **Detail drawer** along the bottom for the selected sensor. Shut, it's one line: the sensor, its
   value and its last minute, so the cards get the window. Click a sensor, or that line, to open it
   to a 1, 5 or 15 minute chart with the hardware's limits drawn as dashed lines. Hover over the
@@ -59,16 +71,39 @@ load and power reading your machine exposes, refreshes them at an interval you c
   button in the detail drawer, to see it across the whole window:
   - a dial with the reading against its scale, its high limit marked and its critical zone
     shaded. A power reading fills against its limit, and a clock against its top speed (each CPU
-    core's own, and an NVIDIA card's). Sensors with no natural scale (voltages, fan RPM, traffic)
-    show the number alone;
+    core's own, and an NVIDIA card's). Sensors with no natural scale borrow one and name it under
+    the ring, saying when the reading is off either end: a voltage fills between its limits, or
+    across a supply rail's typical range, or else across its range on the chart (at least
+    0.05 V); a fan, a clock, power without a limit, current or traffic against its highest yet;
   - the headroom to its limit, and which way it's heading;
   - a large chart that always keeps the limits in view, with its peak and a 1-minute average;
   - every statistic, each with a word on what it means.
 
+  Where the hardware reports no limit at all, corewatch fills in a typical one and says so: ±5 %
+  for the named supply rails (+12V, +5V, +3.3V, +3.3V standby and AVCC), and for a graphics
+  card's or a drive's other temperatures (hotspot, memory, a drive's extra sensors) the critical
+  (or, without one, high) limit of its main one, since those run hotter than it by design. They
+  show in the headroom, the chart, the drawer and the list as "typical"; a load or a fan control
+  is simply "full at 100 %". They never turn a sensor amber or red or count as time past a limit.
+  Sensors with nothing sensible to fill in (unnamed voltages, fan speeds, a board's other
+  temperatures) still say no limit.
+
+  A fan has no top speed to warn at, but it can stall: one that has run steadily since corewatch
+  started and then reads 0 RPM for 10 seconds while its control asks 40 % or more turns amber
+  (in a pinned tray icon too) and says "stalled" in the headroom, the drawer and the list, and the
+  time counts as past a limit. Below 40 % a fan may be resting by design (a graphics card's
+  zero-RPM mode, a board's fan stop). A ThinkPad's fan is never judged this way: its control
+  reads 100 % while the firmware rests the fan. An NVIDIA card reports the speed it intends
+  rather than the one it gets, so a blocked NVIDIA fan may never read 0 RPM.
+
   For a CPU sensor, **Every core** charts each core's temperature over the same minutes on one
-  scale, with its peak and clock; click a core to focus on it. The pencil beside the name renames
-  it, and Pin to tray works from here too. The up and down arrows beside **Back** (or Ctrl+PgUp
-  and Ctrl+PgDn) step to the previous or next sensor in the overview's order, without going back.
+  scale, with its peak and clock; click a core to focus on it. **Same device** charts up to 12 of
+  the other sensors on its device over the same minutes, each on its own scale: a fan's control
+  (or a control's fan) first, then its own kind, and a CPU's per-core sensors only when there are
+  too few cores for **Every core**. Click one to focus on it. The pencil beside the sensor's name
+  renames it, and Pin to tray works from here too. The up and down arrows beside **Back** (or
+  Ctrl+PgUp and Ctrl+PgDn) step to the previous or next sensor in the overview's order, without
+  going back.
   Esc or **Back** goes back, and so does typing in the filter.
 - **Readable names.** Intel hybrid CPUs show P-core 0-7 and E-core 0-7 instead of the kernel's
   gappy core IDs. Nuvoton motherboard chips get named voltage rails (Vcore, +12V, +5V, +3.3V, ...).
@@ -76,21 +111,25 @@ load and power reading your machine exposes, refreshes them at an interval you c
   "CPU fan"); **Reset name** undoes it.
 - **Tray icon.** corewatch's logo sits in the tray, in one colour like the desktop's own icons
   there. Its menu opens the window and has every option the window has: reset min/max, update
-  interval, °C/°F, the min/max columns, and everything in the settings menu, through to Quit.
+  interval, °C/°F, min / max in the list, and everything in the settings menu, through to Quit.
   Double-click it (or, on desktops where a click doesn't open the menu, click it) to bring the
   window up.
 - **Pin sensors to the tray.** Right-click a sensor and choose **Pin to tray**, or use the button
   in the detail drawer. Each pinned sensor gets its own tray icon showing its number, like Core
-  Temp's per-core icons. Right-click one to see its group, name, min, max and average, or to
-  unpin it (which also works for a sensor that has stopped reporting; its icon shows "?"). On desktops
-  whose tray shows tooltips (KDE, Xfce, Cinnamon) hovering shows the same; Ubuntu's doesn't.
+  Temp's per-core icons: in the panel's own colour (with a faint outline, so it reads on either
+  kind of panel) over a cyan line, which turns amber once the sensor is warm (a temperature from
+  50 °C, anything past its high limit or below its low limit, or a stalled fan). At critical the
+  number turns red too. Right-click one to see its group, name, min, max and average, or to unpin
+  it (which also works for a sensor that has stopped reporting; its icon shows a grey "?"). On
+  desktops whose tray shows tooltips (KDE, Xfce, Cinnamon) hovering shows the same; Ubuntu's
+  doesn't.
   Double-clicking a pinned icon also brings the window up.
 - **Noise hidden by default.** Empty motherboard fan headers and unconnected temperature probes are
   hidden (Settings → Show unused sensors brings them back). A fan that stops after spinning is never
   hidden, and neither is anything in a warning state or a GPU fan idling at 0 RPM.
 - **Comfortable to leave open.** Light and dark themes (following the desktop by default), a filter
   box (Ctrl+F), the update interval and °C/°F in the top row; everything else, from **Reset min/max** (Ctrl+R) and the
-  min/max columns down, is under the settings button at its right. The toolbar shows the computer's
+  min / max in the list down, is under the settings button at its right. The toolbar shows the computer's
   name next to the logo (turn off **Show this computer's name** for screenshots) and a LIVE chip that
   turns amber with **WAITING FOR A READING** if a reading is well overdue. **Start when I log in** starts corewatch at
   every login (it adds `~/.config/autostart/corewatch.desktop`, which your desktop's Startup

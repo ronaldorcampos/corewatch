@@ -68,6 +68,16 @@ class Reading:
     crit: float | None = None
     # A limit worth showing that isn't a problem to reach, like a GPU's power cap.
     cap: float | None = None
+    # Limits the hardware doesn't report, filled in from what's typical for this sensor
+    # (``corewatch.typical``): shown, and like ``cap`` never a warning.
+    typical_low: float | None = None
+    typical_high: float | None = None
+    # A fan that has spun before standing still while its control drives it: the control's
+    # setting (%), set by the monitor (``Monitor.ingest``). A warning, like a limit passed.
+    stall_duty: float | None = None
+    # A fan control that reports the setting last asked for rather than what the fan is given
+    # (thinkpad_acpi's in automatic mode, where the firmware may stop the fan): never a stall.
+    setpoint: bool = False
     # True when the source knows this input isn't wired to anything (e.g. an open thermistor).
     unused: bool = False
     # Key of the sensor this one belongs to (a fan's speed control -> the fan): hidden together.
@@ -85,6 +95,8 @@ class Reading:
     def status(self) -> Status:
         if self.value is None:
             return Status.OK
+        if self.stall_duty is not None:
+            return Status.WARNING
         if self.crit is not None and self.value >= self.crit:
             return Status.CRITICAL
         if self.high is not None and self.value >= self.high:
@@ -248,6 +260,13 @@ def format_rate(bytes_per_second: float, signed: bool = False) -> str:
     return f"{bytes_per_second / 1e9:{sign}.1f} GB/s"
 
 
+def format_stall(reading: Reading) -> str:
+    """``stalled while its control asks 60 %`` for a stalled fan, else ``""``."""
+    if reading.stall_duty is None:
+        return ""
+    return f"stalled while its control asks {format_value(Kind.FAN_DUTY, reading.stall_duty)}"
+
+
 def format_limit(reading: Reading, fahrenheit: bool = False) -> str:
     """Describe the sensor's thresholds, e.g. ``high 80.0 °C · crit 100.0 °C``."""
     parts = []
@@ -262,6 +281,23 @@ def format_limit(reading: Reading, fahrenheit: bool = False) -> str:
     if reading.cap is not None:
         parts.append(f"{cap_word(reading.kind)} {format_value(reading.kind, reading.cap, fahrenheit)}")
     return " · ".join(parts)
+
+
+def typical_word(kind: Kind) -> str:
+    """What a typical upper limit is called: a load's or a fan control's is simply full."""
+    return "full at" if kind in (Kind.LOAD, Kind.FAN_DUTY) else "typical up to"
+
+
+def format_typical(reading: Reading, fahrenheit: bool = False) -> str:
+    """A sensor's typical limits (``corewatch.typical``), e.g. ``typical 11.400–12.600 V``,
+    ``typical up to 99.0 °C``, or a load's ``full at 100 %``."""
+    kind, low, high = reading.kind, reading.typical_low, reading.typical_high
+    if high is None:
+        return ""
+    if low is not None:
+        number = format_value(kind, low, fahrenheit).rpartition(" ")[0]
+        return f"typical {number}–{format_value(kind, high, fahrenheit)}"
+    return f"{typical_word(kind)} {format_value(kind, high, fahrenheit)}"
 
 
 def cap_word(kind: Kind) -> str:

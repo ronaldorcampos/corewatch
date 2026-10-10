@@ -8,13 +8,13 @@ from pathlib import Path
 
 import pytest
 from fakes import FakeSource, load, temp
-from PySide6.QtCore import QEvent, QObject, QPoint, QRect, QSettings, Qt, Signal
+from PySide6.QtCore import QEvent, QObject, QPoint, QSettings, QSize, Qt, Signal
 from PySide6.QtGui import QColor, QImage
 from PySide6.QtWidgets import QApplication, QLabel
 
 from corewatch.gui import theme
-from corewatch.gui.app import MainWindow, temperature_icon
-from corewatch.gui.sensors import CELL_MIN_W, COLUMN_GAP, short_label
+from corewatch.gui.app import MainWindow, number_icon, tray_level
+from corewatch.gui.sensors import CELL_MIN_W, COLUMN_GAP
 from corewatch.gui.widgets import nice_ticks, split_on_gaps, value_range
 from corewatch.model import Kind, Status, format_duration
 from corewatch.monitor import Monitor
@@ -137,7 +137,7 @@ def test_cards_use_two_columns_or_one_when_narrow(qtbot, settings) -> None:  # t
     assert not hasattr(window.sections["CPU · i7"], "column_buttons")  # no per-card picker
 
 
-def test_number_columns_grow_to_fit_and_never_shrink_mid_session(qtbot, settings) -> None:  # type: ignore[no-untyped-def]
+def test_the_values_room_grows_to_fit_and_never_shrinks_mid_session(qtbot, settings) -> None:  # type: ignore[no-untyped-def]
     from corewatch.model import Reading
 
     def fan(rpm: float) -> list[Reading]:
@@ -145,13 +145,13 @@ def test_number_columns_grow_to_fit_and_never_shrink_mid_session(qtbot, settings
 
     window = make_window(qtbot, settings, [fan(900.0), fan(12_345.0), fan(900.0)])
     grid = window.sections["Fans"].grid
-    narrow = grid.stat_widths["value"]
+    narrow = grid.value_width
     window.refresh()  # 12,345 RPM is wider than 900 RPM
-    wide = grid.stat_widths["value"]
+    wide = grid.value_width
     assert wide > narrow
-    window.refresh()  # back to 900: the column keeps its width so nothing jiggles
-    assert grid.stat_widths["value"] == wide
-    assert grid.cell_min_width() > CELL_MIN_W - 4 * 64  # driven by the measured widths
+    needs = grid.cell_min_width()
+    window.refresh()  # back to 900: the room stays, so the card doesn't ask for a new width
+    assert grid.value_width == wide and grid.cell_min_width() == needs
 
 
 def test_cells_fill_each_column_top_to_bottom(qtbot, settings) -> None:  # type: ignore[no-untyped-def]
@@ -159,19 +159,12 @@ def test_cells_fill_each_column_top_to_bottom(qtbot, settings) -> None:  # type:
     window = make_window(qtbot, settings, script)
     grid = window.sections["CPU"].grid
     grid.resize(CELL_MIN_W * 2 + COLUMN_GAP + 40, 10)
+    grid.set_columns(1)
     grid.set_columns(2)
     by_column: dict[int, list[str]] = {}
     for cell in grid.cells():
         by_column.setdefault(cell.rect.x(), []).append(cell.key)
     assert list(by_column.values()) == [["t0", "t1", "t2"], ["t3", "t4"]]
-
-
-def test_short_labels_under_kind_headings() -> None:
-    from corewatch.model import Row
-
-    assert short_label(Row(load("k", "CPU", 3.0, label="P-core 3 load"))) == "P-core 3"
-    assert short_label(Row(load("k", "CPU", 3.0, label="CPU load (all cores)"))) == "CPU load (all cores)"
-    assert short_label(Row(temp("k", "CPU", 3.0, label="Core load"))) == "Core load"  # only for its own kind
 
 
 def test_settings_round_trip(qtbot, settings) -> None:  # type: ignore[no-untyped-def]
@@ -199,10 +192,49 @@ def test_corrupt_settings_fall_back_to_defaults(qtbot, settings) -> None:  # typ
     assert (window.interval, window.theme) == (1.0, "system")
 
 
-def test_tray_icon_draws_status_colour(qapp) -> None:  # type: ignore[no-untyped-def]
-    image = temperature_icon(85.0, Status.CRITICAL, False).pixmap(64, 64).toImage()
-    assert isinstance(image, QImage)
-    assert image.pixelColor(32, 4).name() == "#dc2626"
+def _digits(image: QImage) -> tuple[str, str]:
+    """A tray icon's digits: their colour (the commonest opaque one above the rule), and the
+    faint outline's round them (the commonest half-see-through one)."""
+    from collections import Counter
+
+    pixels = [image.pixelColor(x, y) for x in range(64) for y in range(50)]
+    fill = Counter(p.name() for p in pixels if p.alpha() == 255).most_common(1)[0][0]
+    outline = Counter(p.name() for p in pixels if 120 <= p.alpha() <= 180).most_common(1)
+    return fill, outline[0][0] if outline else ""
+
+
+def test_tray_icon_is_the_number_over_a_rule_coloured_by_its_level(qapp) -> None:  # type: ignore[no-untyped-def]
+    def drawn(text: str, level: str, light_panel: bool = False) -> tuple[str, str]:
+        image = number_icon(text, level, light_panel).pixmap(64, 64).toImage()  # type: ignore[arg-type]
+        assert isinstance(image, QImage)
+        return image.pixelColor(32, 62).name(), _digits(image)[0]
+
+    assert drawn("36", "normal") == ("#22d3ee", "#ffffff")  # white number over a cyan rule
+    assert number_icon("36", "normal").pixmap(64, 64).toImage().pixelColor(32, 2).alpha() == 0  # no tile
+    assert drawn("55", "warm") == ("#f59e0b", "#ffffff")
+    assert drawn("101", "critical") == ("#ff5470", "#ff5470")  # at critical the number turns red too
+    assert drawn("?", "none") == ("#3a4a60", "#8ca3bf")
+    assert drawn("36", "normal", light_panel=True) == ("#22d3ee", "#18181b")  # the light panel's own colour
+    # A faint outline in the other panel's colour, in case the guess at the panel is wrong.
+    assert _digits(number_icon("36", "normal").pixmap(64, 64).toImage())[1] == "#18181b"
+    assert _digits(number_icon("36", "normal", True).pixmap(64, 64).toImage())[1] == "#ffffff"
+    rule_left = number_icon("36", "normal").pixmap(64, 64).toImage()
+    assert rule_left.pixelColor(4, 62).alpha() == 0 and rule_left.pixelColor(8, 62).alpha() == 255  # inset
+
+
+def test_tray_level_warms_before_a_limit_and_knows_a_silent_sensor() -> None:
+    from corewatch.model import Reading, Row, Stats
+
+    def level(kind: Kind, value: float | None, **extra: float | None) -> str:
+        return tray_level(Row(Reading("k", "d", "x", kind, value, **extra), Stats()))
+
+    assert level(Kind.TEMPERATURE, 49.9) == "normal"
+    assert level(Kind.TEMPERATURE, 50.0) == "warm"  # the heat map's warm band, no limit needed
+    assert level(Kind.TEMPERATURE, 95.0, high=94.0, crit=99.0) == "warm"
+    assert level(Kind.TEMPERATURE, 99.0, high=94.0, crit=99.0) == "critical"
+    assert level(Kind.POWER, 400.0, cap=100.0) == "normal"  # a cap is no warning
+    assert level(Kind.VOLTAGE, 11.0, low=11.4) == "warm"  # below a low limit
+    assert level(Kind.LOAD, None) == "none" and tray_level(None) == "none"
 
 
 def test_chart_helpers() -> None:
@@ -299,6 +331,7 @@ class FakeTray(QObject):
 
     def setIcon(self, icon) -> None:  # type: ignore[no-untyped-def]
         self.icons += 1
+        self.icon = icon
 
     def setToolTip(self, text: str) -> None:
         self.tooltips.append(text)
@@ -392,34 +425,320 @@ def test_decimate_keeps_extremes() -> None:
     assert decimate(points[:10], 0.0, 100.0, 50) == points[:10]
 
 
-def test_min_max_toggle_hides_the_columns_and_is_remembered(qtbot, settings) -> None:  # type: ignore[no-untyped-def]
+def test_min_max_toggle_trims_the_grey_line_and_is_remembered(qtbot, settings) -> None:  # type: ignore[no-untyped-def]
     window = make_window(qtbot, settings, SCRIPT)
     grid = window.sections["CPU · i7"].grid
     assert window.min_max_action.isChecked() and grid.shown_stats() == ("value", "min", "max", "avg")
-    with_columns = grid.cell_min_width()
+    window.refresh()
+    assert grid.sub_text("pkg").startswith("min 50.0 · max 85.0 · avg 67.5 °C")
+    with_min_max = grid.cell_min_width()
     window.min_max_action.trigger()
+    assert grid.cell_min_width() < with_min_max  # a shorter grey line needs less room
     assert grid.shown_stats() == ("value", "avg")
-    assert grid.cell_min_width() < with_columns  # the space goes back to the cell
-    parts = grid._parts(grid.cells()[0].rect)
-    assert "min" not in parts and "max" not in parts
+    assert grid.sub_text("pkg").startswith("avg 67.5 °C · warns at 80.0 °C")
     assert settings.value("show_min_max", type=bool) is False
     reopened = make_window(qtbot, settings, SCRIPT)
     assert not reopened.min_max_action.isChecked()
     assert reopened.sections["CPU · i7"].grid.shown_stats() == ("value", "avg")
-    grid.grab()  # paints without the hidden columns
+    grid.grab()  # paints without min and max
 
 
-def test_sparkline_takes_the_space_the_label_does_not_need(qtbot, settings) -> None:  # type: ignore[no-untyped-def]
-    from corewatch.gui.sensors import SPARK_MIN_W
+def test_a_row_is_never_narrower_than_its_grey_line(qtbot, settings) -> None:  # type: ignore[no-untyped-def]
+    from PySide6.QtGui import QFontMetrics
+
+    from corewatch.gui.sensors import CELL_MIN_W, SUB_MAX_W, SensorGrid
+    from corewatch.model import Row, Stats
 
     window = make_window(qtbot, settings, SCRIPT)
+    window.refresh()
     grid = window.sections["CPU · i7"].grid
-    narrow = grid._parts(QRect(0, 0, grid.cell_min_width(), 30))
-    assert narrow["spark"].width() >= SPARK_MIN_W - 1
-    wide = grid._parts(QRect(0, 0, grid.cell_min_width() + 300, 30))
-    assert wide["spark"].width() >= narrow["spark"].width() + 290  # extra width goes to the sparkline
-    assert wide["label"].width() == narrow["label"].width() == grid.label_width
-    assert wide["label"].right() < wide["spark"].left() < wide["spark"].right() < wide["value"].left()
+    line = QFontMetrics(grid._fonts()[3]).horizontalAdvance(grid.sub_text("pkg"))  # its limits come last
+    assert grid.cell_min_width() >= line + 20
+    assert grid.effective_columns(CELL_MIN_W * 2 + COLUMN_GAP) == 1  # too narrow for two whole lines
+    lonely = SensorGrid()
+    qtbot.addWidget(lonely)
+    long = temp("t", "CPU", 50.0, label="t", high=80.0, crit=100.0, low=5.0)
+    lonely.set_rows([Row(long, Stats(minimum=1234.5, maximum=5678.9, total=2345.6, count=1))], 0.0, False, 5.0)
+    assert lonely.cell_min_width() == 20 + SUB_MAX_W  # a very long line is cut rather than widen the card
+
+
+def test_a_rows_tooltip_names_its_limits_as_its_grey_line_does(qtbot, settings) -> None:  # type: ignore[no-untyped-def]
+    from PySide6.QtGui import QHelpEvent
+    from PySide6.QtWidgets import QToolTip
+
+    window = make_window(qtbot, settings, SCRIPT)
+    window.resize(1200, 900)
+    window.show()
+    grid = window.sections["CPU · i7"].grid
+    cell = next(c for c in grid.cells() if c.key == "pkg")
+    point = cell.rect.center()
+    QApplication.sendEvent(grid, QHelpEvent(QEvent.Type.ToolTip, point, grid.mapToGlobal(point)))
+    assert QToolTip.text() == "CPU package\nwarns at 80.0 °C · critical at 100.0 °C"
+    QToolTip.hideText()
+
+
+def test_typical_limits_show_in_the_list_the_drawer_and_the_chart(qtbot, settings) -> None:  # type: ignore[no-untyped-def]
+    from corewatch.model import Reading
+
+    board = "Motherboard · Z790"
+    script = [[Reading("v12", board, "+12V", Kind.VOLTAGE, 12.0), load("cpu-load", "CPU", 4.0, label="CPU load")]] * 3
+    window = make_window(qtbot, settings, script)
+    window.resize(1200, 900)
+    window.show()
+    window.refresh()
+    rails = window.sections[board].grid
+    assert rails.sub_text("v12").endswith("typical 11.400–12.600 V")
+    assert window.sections["CPU"].grid.sub_text("cpu-load").endswith("full at 100 %")
+    window._select("v12")
+    assert window.detail.limits.text() == "The hardware reports no limits; typical 11.400–12.600 V"
+    chart = window.detail.chart
+    chart.focus = True
+    low, high = chart.scale([(0.0, 12.0)])
+    assert low < 11.4 and high > 12.6  # the typical range stays in view
+    window._select("cpu-load")
+    assert window.detail.stat_values["past_limit"].text() == "no limit"  # a typical limit is never charged
+
+
+def test_a_peak_at_the_charts_top_is_labelled_under_its_dot_clear_of_a_limits_name() -> None:
+    from PySide6.QtCore import QPointF, QRectF
+
+    from corewatch.gui.widgets import point_label_box
+
+    plot = QRectF(40, 10, 500, 200)
+    middle = point_label_box(QPointF(200, 120), 80, 14, True, plot, [])
+    assert middle.bottom() < 120  # room over it: over its dot
+    pegged = point_label_box(QPointF(200, 10), 80, 14, True, plot, [])
+    assert pegged.top() > 10  # a load at full, on the top line: under its dot, not cut off
+    full = QRectF(170, 12, 120, 14)  # "FULL 100 %", written under its line for want of room
+    clear = point_label_box(QPointF(200, 10), 80, 14, True, plot, [full])
+    assert clear.top() >= full.bottom() and not clear.intersects(full)
+    low = point_label_box(QPointF(200, 150), 80, 14, False, plot, [])
+    assert low.top() > 150  # a low: under its dot as before
+    dip = point_label_box(QPointF(220, 12), 80, 14, False, plot, [full, clear])  # 99 % just after
+    assert dip.top() >= clear.bottom() and not dip.intersects(clear) and not dip.intersects(full)
+
+
+def test_charts_draw_typical_limits_muted_and_keep_a_loads_axis_at_full() -> None:
+    from corewatch.gui.widgets import limit_lines, nice_ticks, value_range
+    from corewatch.model import Reading
+
+    current = theme.current_theme()
+    rail = Reading("v", "B", "+12V", Kind.VOLTAGE, 12.0, typical_low=11.4, typical_high=12.6)
+    load_ = Reading("l", "CPU", "CPU load", Kind.LOAD, 5.0, typical_high=100.0)
+    assert limit_lines(rail, current) == [(12.6, current.muted, "typical high"), (11.4, current.muted, "typical low")]
+    assert limit_lines(load_, current) == [(100.0, current.muted, "full")]
+    low, high = value_range([3.0, 9.0, 100.0], Kind.LOAD)  # an idle core, with full in view
+    assert (low, high) == (0.0, 100.0) and max(nice_ticks(low, high)) == 100
+
+
+def test_a_solid_bar_shows_its_warning_tick_and_turns_amber_then_red(qtbot) -> None:  # type: ignore[no-untyped-def]
+    from corewatch.gui.sensors import SensorGrid
+    from corewatch.model import Row
+
+    current = theme.current_theme()
+
+    def painted(value: float, high: float = 80.0) -> tuple[set[str], list[int]]:
+        grid = SensorGrid()
+        qtbot.addWidget(grid)
+        grid.set_rows([Row(temp("t", "CPU", value, label="t", high=high, crit=100.0))], 0.0, False, 5.0)
+        grid.set_columns(1)  # the row across the whole 600 px
+        grid.resize(600, grid.height())
+        image = grid.grab().toImage()
+        edge = QColor(current.edge).name()
+        bar = [y for y in range(grid.height()) if image.pixelColor(585, y).name() == edge]  # its unfilled end
+        names = {image.pixelColor(x, bar[0]).name() for x in range(10, 590)}
+        above = bar[0] - 2  # the tick stands out over the bar
+        ticks = [x for x in range(10, 590) if image.pixelColor(x, above).name() == QColor(current.warning).name()]
+        return names, ticks
+
+    names, ticks = painted(85.0)  # past 80: warning
+    assert QColor(current.warning).name() in names and QColor(current.accent).name() not in names
+    assert ticks and abs(sum(ticks) / len(ticks) - (10 + 580 * 80 / 105)) <= 2  # the tick, above the bar
+    names, _ = painted(101.0)  # past 100: critical
+    assert QColor(current.critical).name() in names
+    _, ticks = painted(50.0, high=127.0)  # a limit past the bar's end: its tick at the end
+    assert ticks and max(ticks) >= 587
+
+
+def test_a_row_with_nothing_to_fill_against_draws_its_last_minute(qtbot) -> None:  # type: ignore[no-untyped-def]
+    from corewatch.gui.sensors import SensorGrid
+    from corewatch.model import Reading, Row
+
+    rail = Row(Reading("v", "Board", "Vcore", Kind.VOLTAGE, 1.1))
+    for t, v in enumerate((1.0, 1.2, 1.1, 1.3, 1.1)):
+        rail.stats.add(v, float(t))
+    grid = SensorGrid()
+    qtbot.addWidget(grid)
+    grid.set_rows([rail], 4.0, False, 5.0)
+    grid.set_columns(1)
+    grid.set_selected(None)
+    grid.resize(600, grid.height())
+    image = grid.grab().toImage()
+    current = theme.current_theme()
+    line = {
+        (x, y)
+        for x in range(10, 590)
+        for y in range(25, 45)
+        if image.pixelColor(x, y).name() == QColor(current.accent).name()
+    }
+    assert len({y for _, y in line}) > 2  # a line that goes up and down, not a flat bar
+    assert not any(image.pixelColor(x, 34).name() == QColor(current.edge).name() for x in range(10, 590))  # no bar
+
+
+def test_a_rows_bar_fills_against_what_its_sensor_can_reach() -> None:
+    from corewatch.gui.sensors import bar_scale
+    from corewatch.model import Reading
+
+    def reading(kind: Kind, **extra: float) -> Reading:
+        return Reading("k", "CPU", "x", kind, 10.0, **extra)  # type: ignore[arg-type]
+
+    assert bar_scale(reading(Kind.TEMPERATURE)) == 90.0  # like the Storage card's bars
+    assert bar_scale(reading(Kind.TEMPERATURE, high=80.0, crit=100.0)) == 105.0  # its limits in view
+    assert bar_scale(reading(Kind.LOAD)) == bar_scale(reading(Kind.FAN_DUTY)) == 100.0
+    assert bar_scale(reading(Kind.CLOCK, cap=5300.0)) == 5300.0  # its top clock
+    assert bar_scale(reading(Kind.POWER, cap=253.0)) == 253.0  # its limit
+    for nothing_caps_it in (Kind.CLOCK, Kind.POWER, Kind.VOLTAGE, Kind.FAN, Kind.THROUGHPUT):
+        assert bar_scale(reading(nothing_caps_it)) is None  # its last minute instead
+
+
+def test_a_rows_grey_line_gives_its_stats_and_limits(qtbot, settings) -> None:  # type: ignore[no-untyped-def]
+    from corewatch.model import Reading, Row
+
+    script = [
+        [
+            Reading("clk", "CPU", "P-core 0 clock", Kind.CLOCK, 4623.0, cap=5300.0),
+            Reading("pw", "CPU", "Package power", Kind.POWER, 64.0, cap=253.0),
+            Reading("rx", "CPU", "Download", Kind.THROUGHPUT, 2_500_000.0),
+            temp("t", "CPU", None, label="Temperature 1"),
+        ]
+    ] * 3
+    window = make_window(qtbot, settings, script)
+    window.refresh()
+    grid = window.sections["CPU"].grid
+    assert grid.sub_text("clk") == "min 4,623 · max 4,623 · avg 4,623 MHz · max clock 5,300 MHz"
+    assert grid.sub_text("pw") == "min 64.0 · max 64.0 · avg 64.0 W · limit 253.0 W"
+    assert grid.sub_text("rx") == "min 2.5 MB/s · max 2.5 MB/s · avg 2.5 MB/s"  # each rate in its own unit
+    assert grid.sub_text("t") == ""  # nothing read yet: no row of dashes
+    rail = Reading("v", "Board", "+12V", Kind.VOLTAGE, 12.0, low=11.4, high=12.6, crit=13.2)
+    grid.set_rows([*grid.rows, Row(rail)], grid.now, False, grid.gap)
+    assert grid.sub_text("v") == "warns at 12.600 V · critical at 13.200 V · low under 11.400 V"
+
+
+def test_a_bar_with_no_natural_top_fills_against_its_limit_or_its_highest_yet() -> None:
+    from corewatch.gui.sensors import bar_limits, fill_scale
+    from corewatch.model import Reading, Row
+
+    fan = Row(Reading("f", "Fans", "Fan 2", Kind.FAN, 1500.0))
+    fan.stats.add(3000.0, 1.0)
+    fan.stats.add(1500.0, 2.0)
+    assert fill_scale(fan) == 3000.0  # its fastest this session
+    rail = Row(Reading("v", "Board", "+12V", Kind.VOLTAGE, 12.0, low=11.4, high=12.6))
+    assert fill_scale(rail) == 12.6  # its warning limit
+    assert fill_scale(Row(Reading("v", "Board", "Vcore", Kind.VOLTAGE, None))) is None  # nothing read: unlit
+    hot = Reading("t", "CPU", "Package", Kind.TEMPERATURE, 85.0, high=80.0, crit=100.0)
+    assert bar_limits(hot, 105.0) == (80 / 105, 100 / 105)
+    duty = Reading("d", "Fans", "Fan control 2", Kind.FAN_DUTY, 50.0)
+    assert bar_limits(duty, 100.0) == (0.8, None)  # driven hard
+    assert bar_limits(Reading("p", "GPU", "Power", Kind.POWER, 50.0, cap=100.0), 100.0) == (None, None)  # normal
+    assert bar_limits(Reading("c", "CPU", "Clock", Kind.CLOCK, 5.0, cap=5300.0), 5300.0) == (None, None)
+
+
+def test_only_the_fans_card_lists_with_stepped_bars(qtbot, settings) -> None:  # type: ignore[no-untyped-def]
+    window = _open_window(qtbot, settings)
+    assert window.sections["Fans"].grid.stepped
+    assert not any(section.grid.stepped for device, section in window.sections.items() if device != "Fans")
+
+
+def test_a_fans_speed_row_shows_how_hard_its_set_to_work(qtbot) -> None:  # type: ignore[no-untyped-def]
+    from corewatch.gui.cards import fan_duties
+    from corewatch.gui.sensors import SensorGrid
+    from corewatch.model import Row, Stats
+
+    fan = Row(_gathered("mb", "Motherboard · Z790", "Fan 2", Kind.FAN, 1500.0))
+    control = Row(_gathered("mb-pwm", "Motherboard · Z790", "Fan control 2", Kind.FAN_DUTY, 58.0, companion="mb"))
+    free = Row(_gathered("free", "Motherboard · Z790", "Fan 3", Kind.FAN, 900.0), Stats(maximum=1800.0))
+    grid = SensorGrid(stepped=True)  # as the Fans card's list has it
+    qtbot.addWidget(grid)
+    grid.set_rows([fan, control, free], 0.0, False, 5.0)
+    grid.set_duties(fan_duties([fan, control, free]))  # as its card pairs them, filter or not
+    assert grid._steps(fan) == (0.58, 0.8, None)  # like the card's view: its control, amber when driven hard
+    assert grid._steps(control) == (0.58, 0.8, None)
+    assert grid._steps(free) == (0.5, None, None)  # no control: its speed against its fastest yet
+
+
+def test_a_filter_leaves_a_fans_bar_as_it_was(qtbot, settings) -> None:  # type: ignore[no-untyped-def]
+    from corewatch.model import Reading
+
+    board = "Motherboard · Z790"
+    script = [
+        [
+            Reading("hwmon/nct/fan2", board, "Fan 2", Kind.FAN, 1500.0),
+            Reading("hwmon/nct/pwm2", board, "Fan control 2", Kind.FAN_DUTY, 90.0, companion="hwmon/nct/fan2"),
+        ]
+    ] * 3
+    window = make_window(qtbot, settings, script)
+    window.refresh()
+    grid = window.sections["Fans"].grid
+    fan = next(row for row in grid.rows if row.reading.key == "hwmon/nct/fan2")
+    assert grid._steps(fan) == (0.9, 0.8, None)
+    window.filter.setText("fan 2")  # matches the fan, not its control
+    window.refresh()  # a new reading while filtered
+    assert [row.reading.key for row in grid.rows] == ["hwmon/nct/fan2"]
+    assert grid._steps(grid.rows[0]) == (0.9, 0.8, None)  # still its control's 90 %
+
+
+def test_a_bars_steps_turn_amber_past_the_warning_and_red_past_critical(qtbot) -> None:  # type: ignore[no-untyped-def]
+    from corewatch.gui.sensors import SensorGrid
+    from corewatch.model import Row
+
+    grid = SensorGrid(stepped=True)  # as the Fans card's list has it
+    qtbot.addWidget(grid)
+    grid.set_rows([Row(temp("t", "Fans", 101.0, label="Package", high=80.0, crit=100.0))], 0.0, False, 5.0)
+    grid.resize(600, grid.height())
+    image = grid.grab().toImage()
+    current = theme.current_theme()
+    rect = grid.cells()[0].rect
+    left, width = rect.left() + 10, rect.width() - 20
+    step = (width - 27) / 10
+
+    bar_colours = {QColor(c).name() for c in (current.accent, current.warning, current.critical, current.edge)}
+
+    def colour(index: int) -> str:
+        x = int(left + index * (step + 3) + step / 2)
+        return next((name for y in range(20, 50) if (name := image.pixelColor(x, y).name()) in bar_colours), "")
+
+    # 80 and 100 of a 105 °C bar: steps 0-6 cyan, 7-8 amber, 9 (past 100) red.
+    assert [colour(i) for i in (0, 6, 7, 8, 9)] == [
+        QColor(c).name() for c in (current.accent, current.accent, current.warning, current.warning, current.critical)
+    ]
+
+
+def test_a_card_lists_in_two_columns_when_wide_and_one_when_half(qtbot, settings) -> None:  # type: ignore[no-untyped-def]
+    window = _open_window(qtbot, settings)
+    gpu, acpi = window.sections[GPU].grid, window.sections["Motherboard · ACPI thermal zone"].grid
+    assert (gpu.columns, acpi.columns) == (2, 1)
+    assert len({cell.rect.x() for cell in gpu.cells()}) == 2  # the GPU card is wide: side by side
+    window.set_panel_wide("Motherboard · ACPI thermal zone", True)
+    assert acpi.columns == 2
+
+
+def test_a_bar_is_filled_as_far_as_its_reading(qtbot, settings) -> None:  # type: ignore[no-untyped-def]
+    script = [[temp("t", "CPU", 45.0, label="Half way")]] * 3  # 45 of a 90 °C bar
+    window = make_window(qtbot, settings, script)
+    window.refresh()
+    grid = window.sections["CPU"].grid
+    grid.set_selected(None)  # no accent stripe down the row's edge
+    grid.resize(600, grid.height())
+    image = grid.grab().toImage()
+    accent = QColor(theme.current_theme().accent).name()
+    rect = grid.cells()[0].rect
+    filled = [
+        x
+        for x in range(rect.left(), rect.right())
+        if any(image.pixelColor(x, y).name() == accent for y in range(30, 45))
+    ]
+    left, width = rect.left() + 10, rect.width() - 20
+    assert filled and abs(min(filled) - left) <= 1 and abs(max(filled) - (left + width / 2)) <= 3  # less the half gap
 
 
 def test_hovering_the_chart_picks_the_nearest_reading(qtbot, settings) -> None:  # type: ignore[no-untyped-def]
@@ -628,6 +947,16 @@ def test_pinned_sensors_get_their_own_tray_icons(qtbot, settings) -> None:  # ty
     assert list(reopened.trays) == ["", "cpu-load"]
 
 
+def test_pinned_icons_draw_in_the_panels_colour(qtbot, settings) -> None:  # type: ignore[no-untyped-def]
+    window = make_window(qtbot, settings, SCRIPT)
+    window.light_panel = True
+    made: list[FakeTray] = []
+    window.attach_tray(lambda: made.append(FakeTray()) or made[-1])  # type: ignore[arg-type,func-returns-value]
+    window.set_pinned("gpu", True)
+    assert _digits(made[-1].icon.pixmap(64, 64).toImage())[0] == "#18181b"  # dark digits on a light panel
+    assert window._tray_states["gpu"][1] == "normal"
+
+
 def test_pin_is_disabled_without_a_system_tray(qtbot, settings) -> None:  # type: ignore[no-untyped-def]
     window = make_window(qtbot, settings, SCRIPT)
     assert not window.sensor_menu("pkg").actions()[0].isEnabled()
@@ -674,7 +1003,7 @@ def test_a_vanished_pinned_sensor_can_be_unpinned_from_its_icon(qtbot, settings)
 
     assert unpin().text() == "Unpin GPU temperature"
     window.refresh()
-    assert window._tray_states["gpu"][0] == "?"
+    assert window._tray_states["gpu"][:2] == ("?", "none")  # a grey "?"
     assert "isn't reporting" in made[-1].tooltips[-1]
     assert unpin().text() == "Unpin this sensor"
     assert [a.text() for a in menu.actions()[:6] if a.isVisible() and not a.isSeparator()] == [
@@ -963,8 +1292,11 @@ def test_corewatchs_tray_menu_has_the_apps_options(qtbot, settings, monkeypatch)
         "---",
         "Quit",
     ]
-    # The settings button holds the same options as the tray icon, minus opening the window.
-    assert texts(window.settings_button.menu()) == texts(logo.menu)[2:]
+    # The settings button holds the same options as the tray icon, minus opening the window, plus
+    # editing the window's layout.
+    tray_options = texts(logo.menu)[2:]
+    at = tray_options.index("Theme")
+    assert texts(window.settings_button.menu()) == [*tray_options[:at], "Edit layout…", "---", *tray_options[at:]]
     assert texts(pinned.menu)[-1] == "Unpin CPU package"  # a pinned icon's menu is about its sensor only
     assert "Quit" not in texts(pinned.menu)
 
@@ -1236,9 +1568,9 @@ def test_tray_number_icons_ignore_the_apps_bundled_font(qapp) -> None:  # type: 
     before = QApplication.font()
     try:
         QApplication.setFont(QFont(theme.BODY_FONT))
-        body = temperature_icon(45.0, Status.OK, False).pixmap(64, 64).toImage()
+        body = number_icon("45", "normal").pixmap(64, 64).toImage()
         QApplication.setFont(QFont(theme.MONO_FONT))
-        mono = temperature_icon(45.0, Status.OK, False).pixmap(64, 64).toImage()
+        mono = number_icon("45", "normal").pixmap(64, 64).toImage()
     finally:
         QApplication.setFont(before)
     assert body == mono  # drawn in the desktop's own font whatever the app's default is
@@ -1911,7 +2243,7 @@ def test_fan_view_pairs_each_fan_with_how_hard_it_is_driven() -> None:
 
 def test_storage_view_has_a_line_per_drive() -> None:
     from corewatch.gui.cards import StorageView
-    from corewatch.model import Row, Status
+    from corewatch.model import Row
 
     samsung = "NVMe nvme0 · Samsung SSD 980"
     rows = [
@@ -2322,7 +2654,22 @@ def test_a_card_showing_its_list_needs_the_lists_width_beside_another(qtbot, set
     assert window.deck.needs[id(fans)] == theme.px(420)
     fans.table_button.click()
     assert window.deck.needs[id(fans)] == max(theme.px(420), fans.grid.cell_min_width() + 28)
-    assert window.deck.needs[id(fans)] > theme.px(420)  # the list is the wider of the two here
+
+    # A board whose rails have limits: its grey lines ask for more than a half card's floor.
+    from dataclasses import replace
+
+    rows = [replace(r, low=10.8, high=13.2, crit=13.8) if r.key == "v12" else r for r in full_machine()]
+    window = make_window(qtbot, settings, [rows])
+    window.resize(1300, 900)
+    window.show()
+    window.refresh()
+    board = window.sections["Motherboard · Z790"]
+    board.set_show_table(True)
+    window.refresh()
+    with_min_max = window.deck.needs[id(board)]
+    assert with_min_max == board.grid.cell_min_width() + 28 > theme.px(420)  # the list wins
+    window.min_max_action.trigger()  # a shorter grey line: the deck hears of it at once
+    assert window.deck.needs[id(board)] == board.grid.cell_min_width() + 28 < with_min_max
 
 
 def test_side_by_side_cards_line_their_titles_up(qtbot, settings) -> None:  # type: ignore[no-untyped-def]
@@ -2536,6 +2883,11 @@ def test_focus_view_opens_from_the_detail_panel_and_esc_goes_back(qtbot, setting
         ("E-core 1", "72°", "max 72°"),
     ]
     assert focus.cores.selected_key == "pkg"
+    assert not {"P-core 0", "E-core 1"} & {i.name for i in focus.related.items}  # left to the core strip
+    focus.cores.grab()
+    assert focus.cores._lines  # each tile's line, thinned once ...
+    window.refresh()
+    assert focus.cores._lines == {}  # ... and again from the next readings, at the next paint
     assert [s.title for s in focus.outlook.stats] == ["Headroom", "Trend"]
     assert focus.outlook.stats[0].value == "25.0 °C"
     QApplication.processEvents()
@@ -2548,6 +2900,8 @@ def test_focus_view_opens_from_the_detail_panel_and_esc_goes_back(qtbot, setting
     qtbot.mouseDClick(grid, Qt.MouseButton.LeftButton, pos=cell.rect.center())
     assert window.focus_key == "hot" and window.selected_key == "hot"
     assert focus.title.text() == "Hotspot temperature" and not focus.cores_panel.isVisible()  # not a CPU sensor
+    assert focus.related_panel.isVisible() and focus.related.items  # the card's other sensors instead
+    assert "hot" not in {i.key for i in focus.related.items}
     focus.back_button.click()
     assert window.pages.currentWidget() is window.splitter
     window.close_focus()  # already closed: nothing happens
@@ -2694,6 +3048,19 @@ def test_headroom_and_notes_know_which_side_of_a_limit_a_sensor_is() -> None:
     assert headroom(r(Kind.VOLTAGE, 11.6, **rail), False) == ("0.200 V", "above the low limit")  # the nearer one
     assert headroom(r(Kind.VOLTAGE, 12.4, **rail), False) == ("0.200 V", "to the high limit")
     assert dial_full_scale(r(Kind.TEMPERATURE, 1.0, crit=0.0, high=95.0)) == 100.0  # a critical of 0 still counts
+    # With no limit reported, what's typical for the sensor (corewatch.typical), said to be so.
+    assert headroom(r(Kind.LOAD, 4.0, typical_high=100.0), False) == ("96 %", "to full")
+    hot = r(Kind.TEMPERATURE, 35.0, typical_high=94.0)
+    assert headroom(hot, False) == ("59.0 °C", "to its typical limit")
+    assert headroom(r(Kind.TEMPERATURE, 96.0, typical_high=94.0), False) == ("2.0 °C", "past its typical limit")
+    typical_rail = {"typical_low": 11.4, "typical_high": 12.6}
+    assert headroom(r(Kind.VOLTAGE, 11.2, **typical_rail), False) == ("0.200 V", "below its typical low")
+    assert headroom(r(Kind.VOLTAGE, 11.6, **typical_rail), False) == ("0.200 V", "above its typical low")
+    assert headroom(r(Kind.VOLTAGE, 12.4, **typical_rail), False) == ("0.200 V", "to its typical high")
+    assert headroom(r(Kind.VOLTAGE, 12.8, **typical_rail), False) == ("0.200 V", "past its typical high")
+    assert headroom(r(Kind.VOLTAGE, 1.0), False) == ("—", "no limit reported")
+    assert headroom(r(Kind.FAN_DUTY, 105.0, typical_high=100.0), False) == ("0 %", "at full")  # some report 105 %
+    assert dial_full_scale(r(Kind.TEMPERATURE, 35.0, typical_high=104.0)) == 100.0  # the dial marks no typical limit
 
     def past(reading: Reading, seconds: float) -> tuple[str, str]:
         stats = Stats()
@@ -2951,3 +3318,646 @@ def test_a_double_click_where_the_drawer_opens_reaches_the_focus_view(qtbot, set
     window.close_focus()
     qtbot.wait(QApplication.doubleClickInterval() + 50)
     assert not window.detail.expanded
+
+
+# ----- edit-layout mode ---------------------------------------------------------------
+
+
+def test_layout_keeps_your_order_and_places_a_new_panel_where_it_belongs() -> None:
+    from corewatch.gui.layout import GAUGES, Layout
+
+    layout = Layout(order=["Fans", GAUGES, "CPU · i7"])
+    # GPU was never arranged: it goes before the first panel that by default comes after it.
+    assert layout.arrange([GAUGES, "CPU · i7", "GPU · RTX", "Fans"]) == ["GPU · RTX", "Fans", GAUGES, "CPU · i7"]
+    assert layout.arrange(["Storage", "Fans"]) == ["Fans", "Storage"]
+    shown = ["Fans", GAUGES, "CPU · i7"]
+    layout.move("CPU · i7", -1, shown, shown)
+    assert layout.order[:3] == ["Fans", "CPU · i7", GAUGES]
+    layout.move("Fans", -1, layout.order, shown)  # already first: nothing moves
+    assert layout.order[0] == "Fans"
+    layout.drop("Fans", None, ["Fans", "CPU · i7", GAUGES])
+    assert layout.order == ["CPU · i7", GAUGES, "Fans"]
+    layout.order.insert(1, "Network · eth0")  # unplugged: it stays after the panel it followed
+    layout.drop(GAUGES, "CPU · i7", ["CPU · i7", GAUGES, "Fans"])
+    assert layout.order == [GAUGES, "CPU · i7", "Network · eth0", "Fans"]
+    # The arrows move a panel as dropping it would, so a hidden one between stays put either way.
+    shown = [GAUGES, "CPU · i7", "Fans"]
+    layout.move("Fans", -1, [GAUGES, "CPU · i7", "Fans"], shown)
+    assert layout.order == [GAUGES, "Fans", "CPU · i7", "Network · eth0"]
+    hidden_between = Layout(order=["GPU", "Fans", "Storage"])
+    hidden_between.move("Storage", -1, ["GPU", "Fans", "Storage"], ["GPU", "Storage"])
+    assert hidden_between.order == ["Storage", "GPU", "Fans"]
+    hidden_between.drop("GPU", "Storage", ["Storage", "GPU", "Fans"])
+    hidden_between.move("GPU", 1, ["GPU", "Storage", "Fans"], ["GPU", "Storage"])
+    assert hidden_between.order == ["Storage", "GPU", "Fans"]  # after the next shown one
+    assert layout.wide(GAUGES) and layout.wide("GPU · RTX") and not layout.wide("Fans")
+
+
+def test_layout_survives_a_round_trip_and_rejects_junk() -> None:
+    from corewatch.gui.layout import Layout
+
+    layout = Layout(order=["Fans", "CPU · i7"], widths={"Fans": True, "CPU · i7": False}, hidden={"Storage"})
+    again = Layout.load(layout.dump())
+    assert (again.order, again.widths, again.hidden) == (layout.order, layout.widths, layout.hidden)
+    for junk in (None, "", "{", "[1, 2]", '{"order": 3, "widths": [], "hidden": {"a": 1}}'):
+        assert Layout.load(junk) == Layout()
+    odd = Layout.load('{"order": ["a", 4, "a"], "widths": {"a": "wide", "b": "half"}, "hidden": ["c", null]}')
+    assert (odd.order, odd.widths, odd.hidden) == (["a"], {"b": False}, {"c"})
+
+
+def _editing(qtbot, settings):  # type: ignore[no-untyped-def]
+    window = _open_window(qtbot, settings)
+    window.set_editing(True)
+    QApplication.processEvents()
+    return window
+
+
+def _deck_order(window) -> list[str]:  # type: ignore[no-untyped-def]
+    names = {id(window._panel_widget(p)): p for p in window._panels}
+    return [names[id(card)] for card, *_ in window.deck.arrangement(window.deck.width())]
+
+
+def test_edit_layout_shows_every_panels_bar_and_banner(qtbot, settings) -> None:  # type: ignore[no-untyped-def]
+    window = _open_window(qtbot, settings)
+    assert window.gauge_panel.layout_bar is None and all(s.layout_bar is None for s in window.sections.values())
+    window.filter.setText("gpu")
+    window.edit_layout_action.trigger()
+    QApplication.processEvents()
+    assert window.editing and window.layout_banner.isVisible() and window.hidden_box.isVisible()
+    assert window.filter.text() == "" and not window.filter.isEnabled()  # every panel in view
+    for panel in window._panels:
+        widget = window._panel_widget(panel)
+        assert widget.layout_bar is not None and widget.layout_bar.isVisible()
+    cpu = window.sections[CPU]
+    assert not cpu.header.isVisible() and cpu.layout_bar.title.text() == "CPU" and cpu.layout_bar.sub.text() == "i7"
+    assert window.sections["Fans"].layout_bar.sub.text().endswith("sensors")
+    gauges = window.gauge_panel.layout_bar
+    assert not gauges.up.isEnabled() and gauges.down.isEnabled() and gauges.full.isChecked()
+    assert window.hidden_none.isVisible()
+    window.done_button.click()
+    assert not window.editing and not window.layout_banner.isVisible() and window.filter.isEnabled()
+    assert cpu.header.isVisible() and not cpu.layout_bar.isVisible()
+
+
+def test_arrows_widths_and_hiding_rearrange_the_deck_and_are_kept(qtbot, settings) -> None:  # type: ignore[no-untyped-def]
+    window = _editing(qtbot, settings)
+    assert _deck_order(window)[:3] == ["Gauges", CPU, GPU]
+    window.sections[GPU].layout_bar.up.click()
+    assert _deck_order(window)[:3] == ["Gauges", GPU, CPU]
+    window.sections[GPU].layout_bar.half.click()  # GPU beside the next half-width card
+    placed = {
+        window._panels[[id(window._panel_widget(p)) for p in window._panels].index(id(card))]: (r, c, cs)
+        for card, r, c, _, cs in window.deck.arrangement(window.deck.width())
+    }
+    assert placed[GPU][2] == 1 and placed[CPU][2] == 2
+    window.sections["Fans"].layout_bar.hide_button.click()
+    QApplication.processEvents()
+    assert window.sections["Fans"].isHidden() and "Fans" not in _deck_order(window)
+    shows = [window.hidden_buttons.itemAt(i).widget() for i in range(window.hidden_buttons.count())]
+    assert [b.text() for b in shows] == ["Show Fans"] and not window.hidden_none.isVisible()
+    stored = json.loads(settings.value("layout"))
+    assert stored["hidden"] == ["Fans"] and stored["widths"] == {GPU: "half"}
+    window.set_editing(False)
+    window.refresh()
+    assert window.sections["Fans"].isHidden()  # hidden stays hidden outside edit mode
+    assert all(r.reading.device != "Fans" and r.reading.origin != "Fans" for r in window._step_order())
+
+    again = _open_window(qtbot, settings)
+    assert _deck_order(again)[:3] == ["Gauges", GPU, CPU] and again.sections["Fans"].isHidden()
+    again.set_editing(True)
+    QApplication.processEvents()
+    again.hidden_buttons.itemAt(0).widget().click()
+    assert not again.sections["Fans"].isHidden() and again.hidden_none.isVisible()
+    again.reset_layout_button.click()
+    assert _deck_order(again)[:3] == ["Gauges", CPU, GPU] and json.loads(settings.value("layout"))["order"] == []
+
+
+def test_the_gauges_are_a_panel_too(qtbot, settings) -> None:  # type: ignore[no-untyped-def]
+    window = _editing(qtbot, settings)
+    window.gauge_panel.layout_bar.down.click()
+    assert _deck_order(window)[:2] == [CPU, "Gauges"]
+    window.gauge_panel.layout_bar.hide_button.click()
+    assert window.gauge_panel.isHidden()
+    window.set_editing(False)
+    window.refresh()
+    assert window.gauge_panel.isHidden()
+
+
+def test_dragging_a_panel_by_its_grip_drops_it_before_the_card_under_the_pointer(qtbot, settings) -> None:  # type: ignore[no-untyped-def]
+    from PySide6.QtCore import QPointF
+    from PySide6.QtGui import QMouseEvent
+
+    window = _editing(qtbot, settings)
+    grip = window.sections["Fans"].layout_bar.grip
+    gpu = window.sections[GPU]
+
+    def send(kind: QEvent.Type, global_point: QPoint, buttons: Qt.MouseButton) -> None:
+        local = QPointF(grip.mapFromGlobal(global_point))
+        event = QMouseEvent(
+            kind, local, QPointF(global_point), Qt.MouseButton.LeftButton, buttons, Qt.KeyboardModifier.NoModifier
+        )
+        QApplication.sendEvent(grip, event)
+
+    start = grip.mapToGlobal(grip.rect().center())
+    over_gpu = gpu.mapToGlobal(QPoint(gpu.width() // 2, gpu.height() // 4))  # its upper half
+    send(QEvent.Type.MouseButtonPress, start, Qt.MouseButton.LeftButton)
+    send(QEvent.Type.MouseMove, start + QPoint(1, 1), Qt.MouseButton.LeftButton)  # not yet a drag
+    assert not grip.lifted
+    send(QEvent.Type.MouseMove, over_gpu, Qt.MouseButton.LeftButton)
+    assert grip.lifted and window.sections["Fans"].layout_bar.moving.isVisible()
+    line = window.deck.drop_line
+    assert line.isVisible() and abs(line.geometry().center().y() - gpu.geometry().top()) <= 10
+    send(QEvent.Type.MouseButtonRelease, over_gpu, Qt.MouseButton.NoButton)
+    assert not line.isVisible() and not window.sections["Fans"].layout_bar.moving.isVisible()
+    assert _deck_order(window)[:4] == ["Gauges", CPU, "Fans", GPU]
+
+    # Over itself: no line, and letting go there leaves it where it is.
+    QApplication.processEvents()  # the deck in its new order
+    fans = window.sections["Fans"]
+    over_itself = fans.mapToGlobal(QPoint(fans.width() // 2, fans.height() // 4))
+    send(QEvent.Type.MouseButtonPress, start, Qt.MouseButton.LeftButton)
+    send(QEvent.Type.MouseMove, over_itself, Qt.MouseButton.LeftButton)
+    assert grip.lifted and not line.isVisible()
+    send(QEvent.Type.MouseButtonRelease, over_itself, Qt.MouseButton.NoButton)
+    assert _deck_order(window)[:4] == ["Gauges", CPU, "Fans", GPU]
+    start = grip.mapToGlobal(grip.rect().center())
+
+    # Let go over the drawer, over cards scrolled out of view below it: nothing moves.
+    drawer = window.detail.mapToGlobal(window.detail.rect().center())
+    send(QEvent.Type.MouseButtonPress, start, Qt.MouseButton.LeftButton)
+    send(QEvent.Type.MouseMove, drawer, Qt.MouseButton.LeftButton)
+    assert not line.isVisible() and QApplication.overrideCursor() is not None  # the closed hand
+    send(QEvent.Type.MouseButtonRelease, drawer, Qt.MouseButton.NoButton)
+    assert _deck_order(window)[:4] == ["Gauges", CPU, "Fans", GPU] and QApplication.overrideCursor() is None
+
+    # Esc in the middle of a drag: editing ends and the drag lands nowhere.
+    send(QEvent.Type.MouseButtonPress, start, Qt.MouseButton.LeftButton)
+    send(QEvent.Type.MouseMove, over_gpu, Qt.MouseButton.LeftButton)
+    window._escape()
+    assert not window.editing and not grip.lifted and not line.isVisible()
+    assert QApplication.overrideCursor() is None
+    send(QEvent.Type.MouseMove, over_gpu, Qt.MouseButton.LeftButton)
+    send(QEvent.Type.MouseButtonRelease, over_gpu, Qt.MouseButton.NoButton)
+    assert not line.isVisible() and _deck_order(window)[:4] == ["Gauges", CPU, "Fans", GPU]
+    window.set_editing(True)
+    QApplication.processEvents()
+    window.list_area.ensureWidgetVisible(gpu)
+    QApplication.processEvents()
+    near_its_top = QPoint(gpu.width() // 2, 20)
+    assert window._drop_target("Fans", gpu.mapToGlobal(near_its_top)) is not None
+    window.set_editing(False)
+    QApplication.processEvents()
+    window.list_area.ensureWidgetVisible(gpu)
+    QApplication.processEvents()
+    assert window._drop_target("Fans", gpu.mapToGlobal(near_its_top)) is None  # none outside edit mode
+    window.set_editing(True)
+    QApplication.processEvents()
+
+    # Let go far away from the deck: nothing moves.
+    send(QEvent.Type.MouseButtonPress, start, Qt.MouseButton.LeftButton)
+    send(QEvent.Type.MouseMove, window.mapToGlobal(QPoint(-500, -500)), Qt.MouseButton.LeftButton)
+    send(QEvent.Type.MouseButtonRelease, window.mapToGlobal(QPoint(-500, -500)), Qt.MouseButton.NoButton)
+    assert _deck_order(window)[:4] == ["Gauges", CPU, "Fans", GPU]
+
+
+def test_esc_and_the_focus_view_leave_edit_mode(qtbot, settings) -> None:  # type: ignore[no-untyped-def]
+    window = _editing(qtbot, settings)
+    window.activateWindow()
+    qtbot.waitActive(window)
+    assert window.close_focus_shortcut.isEnabled()
+    qtbot.keyClick(window.fahrenheit_button, Qt.Key.Key_Escape)
+    assert not window.editing
+    window.set_editing(True)
+    window.open_focus("pkg")  # a double-click on a sensor while editing
+    assert not window.editing and window.focus_key == "pkg"
+    window.close_focus()
+    window.set_editing(True)
+    window.open_focus("pkg")
+    window.close_focus()
+    window.edit_layout_action.trigger()  # editing again closes nothing that isn't open
+    assert window.editing and window.focus_key is None
+
+
+def test_edit_mode_fits_the_narrowest_window(qtbot, settings) -> None:  # type: ignore[no-untyped-def]
+    window = _editing(qtbot, settings)
+    window._restyle()
+    for panel in window._panels[2:]:  # most of them hidden: their Show buttons wrap
+        window.set_panel_hidden(panel, True)
+    window.resize(720, 900)
+    qtbot.waitUntil(lambda: window.width() == 720)
+    QApplication.processEvents()
+    page, viewport = window.list_area.widget(), window.list_area.viewport()
+    assert page.width() <= viewport.width()  # nothing wider than the window, so nothing cut off
+    buttons = [window.hidden_buttons.itemAt(i).widget() for i in range(window.hidden_buttons.count())]
+    assert len({b.y() for b in buttons}) > 1 and all(b.geometry().right() < page.width() for b in buttons)
+    for card, *_ in window.deck.arrangement(window.deck.width()):
+        bar = card.layout_bar
+        assert bar.hide_button.isVisible() and bar.hide_button.mapTo(page, bar.hide_button.rect().topRight()).x() < (
+            viewport.width()
+        )
+
+
+def test_show_buttons_name_the_whole_panel_even_one_not_here_now(qtbot, settings) -> None:  # type: ignore[no-untyped-def]
+    settings.setValue("layout", json.dumps({"hidden": ["Network · gone"]}))
+    window = _editing(qtbot, settings)
+    for panel in ("Motherboard · Z790", "Motherboard · ACPI thermal zone"):
+        window.set_panel_hidden(panel, True)
+    texts = [window.hidden_buttons.itemAt(i).widget().text() for i in range(window.hidden_buttons.count())]
+    assert texts == [
+        "Show Motherboard · Z790",
+        "Show Motherboard · ACPI thermal zone",
+        "Show Network · gone (not here now)",
+    ]
+    assert window.sections["Motherboard · Z790"].layout_bar.hide_button.accessibleName() == "Hide Motherboard · Z790"
+    window.hidden_buttons.itemAt(2).widget().click()
+    assert "Network · gone" not in window.panel_layout.hidden
+    from corewatch.gui.layout import CardFrame
+
+    assert isinstance(window.hidden_box, CardFrame)  # drawn as a card, like the panels
+
+
+def test_a_card_that_appears_while_editing_gets_its_bar(qtbot, settings) -> None:  # type: ignore[no-untyped-def]
+    script = [[temp("pkg", CPU, 50.0, label="CPU package")], [temp("pkg", CPU, 50.0), temp("gpu", GPU, 41.0)]]
+    window = make_window(qtbot, settings, script)
+    window.resize(1300, 900)
+    window.show()
+    window.set_editing(True)
+    window.refresh()
+    QApplication.processEvents()
+    gpu = window.sections[GPU]
+    assert gpu.layout_bar is not None and gpu.layout_bar.isVisible() and not gpu.header.isVisible()
+
+
+def test_a_sensor_on_a_hidden_card_isnt_left_selected(qtbot, settings) -> None:  # type: ignore[no-untyped-def]
+    window = _open_window(qtbot, settings)
+    on_gauges = {gauge.spec.key for gauge in window.gauges.gauges}
+    gpu_keys = {row.reading.key for row in window.ordered if row.reading.device == GPU}
+    window._select(next(iter(sorted(gpu_keys - on_gauges))))  # one only its card shows
+    window.set_panel_hidden(GPU, True)
+    assert window.selected_key is not None and window.selected_key not in gpu_keys - on_gauges
+    for panel in window._panels:
+        window.set_panel_hidden(panel, True)
+    assert window.selected_key is None and window.detail.title.text() == "No sensor selected"
+
+
+def test_drop_lines_beside_cards_on_one_row_and_after_the_last(qtbot, settings) -> None:  # type: ignore[no-untyped-def]
+    window = _editing(qtbot, settings)
+    deck = window.deck
+    fans, storage = window.sections["Fans"], window.sections["Storage"]
+    assert fans.geometry().top() == storage.geometry().top()  # side by side
+    low_on_storage = QPoint(storage.geometry().left() + 20, storage.geometry().bottom() - 5)
+    assert deck.drop_at(low_on_storage) == (storage, True)  # its left half: before it, low or not
+    deck.mark_drop(deck.drop_at(low_on_storage))
+    line = deck.drop_line.geometry()
+    assert line.height() > line.width() and fans.geometry().right() < line.center().x() < storage.geometry().left()
+    window.set_panel_wide(window._shown_panels()[-1], True)  # alone on the last line
+    QApplication.processEvents()
+    last = deck.arrangement(deck.width())[-1][0]
+    below = QPoint(last.geometry().center().x(), deck.height() + 10)
+    assert deck.drop_at(below) == (last, False)
+    deck.mark_drop(deck.drop_at(below))
+    assert deck.rect().contains(deck.drop_line.geometry())  # inside the deck, so it shows
+    deck.set_cards([(card, wide) for card, wide in deck.cards if card is not last])  # its card goes away
+    assert not deck.drop_line.isVisible() and deck._drop is None
+
+
+def test_a_panel_moved_with_its_arrows_stays_in_view(qtbot, settings) -> None:  # type: ignore[no-untyped-def]
+    window = _editing(qtbot, settings)
+    window.resize(1300, 600)
+    qtbot.waitUntil(lambda: window.height() == 600)
+    gauges = window.gauge_panel
+    for _ in range(len(window._panels) - 1):
+        gauges.layout_bar.down.click()
+        qtbot.wait(5)
+    viewport = window.list_area.viewport()
+    top = gauges.mapTo(viewport, QPoint(0, 0)).y()
+    assert _deck_order(window)[-1] == "Gauges" and 0 <= top < viewport.height()
+
+
+@pytest.fixture(autouse=True)
+def no_cursor_left_over(qapp):  # type: ignore[no-untyped-def]
+    """A drag test that fails half-way leaves the closed hand set app-wide: drop it, so the
+    tests after it fail (or pass) on their own merits."""
+    yield
+    while QApplication.overrideCursor() is not None:
+        QApplication.restoreOverrideCursor()
+
+
+def _drag(grip, to: QPoint, release: bool = False) -> None:  # type: ignore[no-untyped-def]
+    """Press ``grip``, and drag it to ``to`` on screen (and let go there, with ``release``)."""
+    from PySide6.QtCore import QPointF
+    from PySide6.QtGui import QMouseEvent
+
+    def send(kind: QEvent.Type, point: QPoint, buttons: Qt.MouseButton) -> None:
+        local = QPointF(grip.mapFromGlobal(point))
+        event = QMouseEvent(
+            kind, local, QPointF(point), Qt.MouseButton.LeftButton, buttons, Qt.KeyboardModifier.NoModifier
+        )
+        QApplication.sendEvent(grip, event)
+
+    send(QEvent.Type.MouseButtonPress, grip.mapToGlobal(grip.rect().center()), Qt.MouseButton.LeftButton)
+    send(QEvent.Type.MouseMove, to, Qt.MouseButton.LeftButton)
+    if release:
+        send(QEvent.Type.MouseButtonRelease, to, Qt.MouseButton.NoButton)
+
+
+def test_a_sensor_picked_from_a_gauge_stays_picked_with_its_card_hidden(qtbot, settings) -> None:  # type: ignore[no-untyped-def]
+    window = _open_window(qtbot, settings)
+    assert "pkg" in {gauge.spec.key for gauge in window.gauges.gauges}
+    window.set_panel_hidden(CPU, True)
+    window._select("pkg")  # a click on the CPU temperature gauge
+    window.refresh()
+    assert window.selected_key == "pkg" and window.detail.title.text() == "CPU package"
+    window.set_panel_hidden("Gauges", True)  # nowhere in view now: something else is picked
+    assert window.selected_key != "pkg"
+
+
+def test_a_drop_beside_a_half_width_card_alone_on_its_line_is_marked_beside_it(qtbot, settings) -> None:  # type: ignore[no-untyped-def]
+    window = _editing(qtbot, settings)
+    window.panel_layout.drop("Fans", GPU, window._panels)  # Fans alone on its line: GPU is wide
+    window._change_layout()
+    QApplication.processEvents()
+    deck, fans = window.deck, window.sections["Fans"]
+    assert [p for p in _deck_order(window)][:4] == ["Gauges", CPU, "Fans", GPU]
+    window.list_area.ensureWidgetVisible(fans)
+    QApplication.processEvents()
+    right_low = QPoint(fans.width() - 20, fans.height() - 20)  # its lower right
+    assert deck.drop_at(fans.mapTo(deck, right_low)) == (fans, False)
+    grip = window.sections["Storage"].layout_bar.grip
+    _drag(grip, fans.mapToGlobal(right_low))
+    line = deck.drop_line.geometry()
+    assert line.height() > line.width() and line.left() > fans.geometry().right()  # down its right side
+    _drag(grip, fans.mapToGlobal(right_low), release=True)
+    QApplication.processEvents()
+    storage = window.sections["Storage"]
+    assert storage.geometry().top() == fans.geometry().top() > 0  # where the line said: beside it
+    # A wide panel can't sit beside it: the line goes across, under it.
+    deck.mark_drop(deck.drop_at(fans.mapTo(deck, QPoint(20, fans.height() - 20)), wide=True), wide=True)
+    line = deck.drop_line.geometry()
+    assert line.width() > line.height() and line.top() > fans.geometry().bottom() - 4
+
+
+def test_arrows_keep_a_card_taller_than_the_view_reachable(qtbot, settings) -> None:  # type: ignore[no-untyped-def]
+    window = _editing(qtbot, settings)
+    window.resize(1300, 600)
+    qtbot.waitUntil(lambda: window.height() == 600)
+    cpu = window.sections[CPU]
+    cpu.set_show_table(True, user=True)  # its whole list: taller than the view
+    QApplication.processEvents()
+    viewport = window.list_area.viewport()
+    assert cpu.height() > viewport.height()
+    cpu.layout_bar.down.click()
+    qtbot.wait(5)
+    down = cpu.layout_bar.down
+    top = down.mapTo(viewport, QPoint(0, 0)).y()
+    assert top >= 0 and top + down.height() <= viewport.height()  # its arrows still in sight
+
+
+def test_a_card_whose_device_goes_mid_drag_lets_the_drag_go(qtbot, settings) -> None:  # type: ignore[no-untyped-def]
+    both = [temp("pkg", CPU, 50.0, label="CPU package"), temp("gpu", GPU, 41.0, label="GPU temperature")]
+    script = [both, both, [temp("pkg", CPU, 50.0, label="CPU package")]]
+    window = make_window(qtbot, settings, script)
+    window.resize(1300, 900)
+    window.show()
+    window.refresh()
+    window.set_editing(True)
+    QApplication.processEvents()
+    cpu = window.sections[CPU]
+    _drag(window.sections[GPU].layout_bar.grip, cpu.mapToGlobal(QPoint(cpu.width() // 2, 10)))
+    assert window.deck.drop_line.isVisible() and QApplication.overrideCursor() is not None
+    window.refresh()  # the GPU is gone, in the middle of its drag
+    assert GPU not in window.sections
+    assert not window.deck.drop_line.isVisible() and QApplication.overrideCursor() is None
+
+
+def test_a_drag_lets_go_when_the_window_hides(qtbot, settings) -> None:  # type: ignore[no-untyped-def]
+    window = _editing(qtbot, settings)
+    bar, gpu = window.sections["Fans"].layout_bar, window.sections[GPU]
+    _drag(bar.grip, gpu.mapToGlobal(QPoint(gpu.width() // 2, 10)))
+    assert bar.grip.lifted and QApplication.overrideCursor() is not None
+    window.hide()  # closed to the tray with the button held: the release never comes
+    assert not bar.grip.lifted and QApplication.overrideCursor() is None
+    assert not bar.moving.isVisible() and window.editing
+    assert window.deck.drop_line.isHidden() and window.deck._drop is None  # not back when the window is
+
+
+def test_three_digits_in_a_wide_font_keep_their_outline_inside_the_icon(qapp, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    from PySide6.QtGui import QFont, QFontDatabase
+
+    system_font = QFontDatabase.systemFont
+
+    def wide(kind):  # type: ignore[no-untyped-def]
+        font = system_font(kind)
+        font.setLetterSpacing(QFont.SpacingType.AbsoluteSpacing, 12)  # wider than any desktop font
+        return font
+
+    monkeypatch.setattr(QFontDatabase, "systemFont", staticmethod(wide))
+    image = number_icon("188", "normal").pixmap(64, 64).toImage()
+    assert max(image.pixelColor(x, y).alpha() for x in (0, 63) for y in range(64)) == 0
+    assert _digits(image) == ("#ffffff", "#18181b")  # digits and their outline both still there
+
+
+def test_layout_bars_follow_the_theme(qtbot, settings) -> None:  # type: ignore[no-untyped-def]
+    window = _editing(qtbot, settings)
+
+    def icons() -> list[QImage]:
+        bars = [window.gauge_panel.layout_bar, window.sections[CPU].layout_bar]
+        return [b.hide_button.icon().pixmap(16, 16).toImage() for b in bars] + [
+            b.up.icon().pixmap(16, 16).toImage() for b in bars
+        ]
+
+    window.apply_theme("dark")
+    dark = icons()
+    window.apply_theme("light")
+    assert all(a != b for a, b in zip(dark, icons(), strict=True))
+    window.apply_theme("system")
+
+
+def test_an_unplugged_panel_stays_put_when_the_one_it_followed_moves() -> None:
+    from corewatch.gui.layout import FlowRow, Layout
+
+    layout = Layout(order=["CPU", "Network · eth0", "GPU", "Fans"])  # eth0 is unplugged
+    layout.drop("CPU", None, ["CPU", "GPU", "Fans"])
+    assert layout.order == ["Network · eth0", "GPU", "Fans", "CPU"]
+    layout = Layout(order=["GPU", "CPU", "Network · eth0", "Fans"])
+    layout.move("CPU", 1, ["GPU", "CPU", "Fans"], ["GPU", "CPU", "Fans"])
+    assert layout.order == ["GPU", "Network · eth0", "Fans", "CPU"]
+    empty = FlowRow()
+    assert empty.minimumSize() == QSize(0, 0) and empty.sizeHint() == QSize(0, 0)
+
+
+def test_a_filter_doesnt_take_away_a_sensor_picked_from_a_gauge(qtbot, settings) -> None:  # type: ignore[no-untyped-def]
+    window = _open_window(qtbot, settings)
+    window.set_panel_hidden(CPU, True)
+    window._select("pkg")  # from the CPU temperature gauge
+    window.filter.setText("temp")  # the gauges step aside while filtering
+    assert window.selected_key == "pkg"
+    window.filter.clear()
+    assert window.selected_key == "pkg" and window.detail.title.text() == "CPU package"
+
+
+def test_a_wide_panel_aimed_at_the_right_of_a_pair_is_marked_where_it_lands(qtbot, settings) -> None:  # type: ignore[no-untyped-def]
+    window = _editing(qtbot, settings)
+    deck, fans, storage = window.deck, window.sections["Fans"], window.sections["Storage"]
+    assert fans.geometry().top() == storage.geometry().top()  # side by side
+    upper_storage = QPoint(storage.geometry().center().x(), storage.geometry().top() + 20)
+    lower_fans = QPoint(fans.geometry().center().x(), fans.geometry().bottom() - 20)
+    assert deck.drop_at(upper_storage, wide=True) == (storage, True)
+    deck.mark_drop(deck.drop_at(upper_storage, wide=True), wide=True)
+    aimed_at_storage = deck.drop_line.geometry()
+    deck.mark_drop(deck.drop_at(lower_fans, wide=True), wide=True)
+    assert aimed_at_storage == deck.drop_line.geometry()  # one slot, one line: under Fans
+    assert aimed_at_storage.top() > fans.geometry().bottom() - 4
+    window.list_area.ensureWidgetVisible(storage)
+    QApplication.processEvents()
+    window._drop_panel(CPU, deck.mapToGlobal(QPoint(storage.geometry().center().x(), storage.geometry().top() + 20)))
+    QApplication.processEvents()
+    cpu = window.sections[CPU]
+    assert fans.geometry().bottom() < cpu.geometry().top() < storage.geometry().top()  # where the line was
+
+
+def test_a_stalled_fan_says_so_in_its_tooltip_headroom_and_word() -> None:
+    from corewatch.gui.focus import headroom, reading_word
+    from corewatch.gui.sensors import limit_text
+    from corewatch.model import Reading
+
+    stalled = Reading("f", "Fans", "CPU fan", Kind.FAN, 0.0, low=300.0, stall_duty=60.0)
+    assert limit_text(stalled, False) == "stalled while its control asks 60 % · low under 300 RPM"
+    assert headroom(stalled, False) == ("stalled", "its control asks 60 %")
+    assert reading_word(stalled) == "stalled"
+    resting = Reading("f", "Fans", "CPU fan", Kind.FAN, 0.0)
+    assert limit_text(resting, False) == "" and headroom(resting, False) == ("—", "no limit reported")
+
+
+def test_the_drawer_names_a_stalled_fan_and_charges_the_stall(qtbot, settings) -> None:  # type: ignore[no-untyped-def]
+    from corewatch.model import Reading
+
+    def board(rpm: float) -> list[Reading]:
+        return [
+            Reading("fan2", "Motherboard", "Fan 2", Kind.FAN, rpm, empty_if_idle=True),
+            Reading("pwm2", "Motherboard", "Fan control 2", Kind.FAN_DUTY, 60.0, companion="fan2"),
+        ]
+
+    window = make_window(qtbot, settings, [board(900.0)] * 3 + [board(0.0)] * 30)  # ran, then stopped
+    window.resize(1200, 900)
+    window.show()
+    for _ in range(20):
+        window.refresh()
+    window._select("fan2")
+    assert window.detail.limits.text() == "Stalled while its control asks 60 %."
+    assert window.detail.stat_values["past_limit"].text() != "no limit"  # though it has no limit
+
+
+def test_the_focus_ring_borrows_a_scale_where_the_sensor_has_none(qtbot) -> None:  # type: ignore[no-untyped-def]
+    from corewatch.gui.focus import Dial, RingScale, ring_scale
+    from corewatch.gui.widgets import value_range
+    from corewatch.model import Reading, Row, Stats
+
+    def row(reading: Reading, *values: float, every: float = 1.0) -> Row:
+        stats = Stats()
+        for at, value in enumerate(values):
+            stats.add(value, at * every)
+        return Row(reading, stats)
+
+    def scale(row: Row) -> RingScale | None:  # over the last 5 minutes, just after the newest reading
+        return ring_scale(row, False, row.stats.history[-1][0] if row.stats.history else 0.0, 300.0)
+
+    board = "Motherboard"
+    assert scale(row(load("l", "CPU", 5.0), 5.0)) == RingScale(0.0, 100.0)  # its natural scale
+    rail = Reading("v", board, "+12V", Kind.VOLTAGE, 12.0, typical_low=11.4, typical_high=12.6)
+    assert scale(row(rail, 12.0)) == RingScale(11.4, 12.6, "typical 11.400–12.600 V")
+    limited = Reading("v", board, "Vcore", Kind.VOLTAGE, 1.2, low=1.0, high=1.5, typical_low=0.0, typical_high=9.0)
+    assert scale(row(limited, 1.2)) == RingScale(1.0, 1.5, "between its limits, 1.000–1.500 V")  # its own first
+    vcore = Reading("c", board, "Vcore", Kind.VOLTAGE, 1.2)
+    assert scale(row(vcore, 1.1, 1.25)) == RingScale(
+        *value_range([1.1, 1.25], Kind.VOLTAGE), ("across its last 5 minutes, 1.100–1.250 V")
+    )
+    assert scale(row(vcore, 1.2, 1.2)) is None  # steady: no range to fill
+    flicker = scale(row(vcore, 0.616, 0.624, 0.616))  # one step of the chip's resolution
+    assert flicker is not None and flicker.full - flicker.start >= 0.05  # not empty one sample, full the next
+    stray = scale(row(vcore, 0.0, *[1.1, 1.104] * 200, every=1.0))  # a 0 V glitch, 400 s ago
+    assert stray is not None and stray.start > 1.0  # aged out of the chart's window
+    fan = Reading("f", board, "Fan 2", Kind.FAN, 1500.0)
+    assert scale(row(fan, 1500.0, 1741.0)) == RingScale(0.0, 1741.0, "against its fastest yet, 1,741 RPM")
+    assert scale(row(fan, 0.0)) is None  # never spun: nothing to measure it against
+    dial = Dial()
+    qtbot.addWidget(dial)
+    dial.set_reading(fan, False, scale(row(fan, 1741.0)))
+    assert dial.legend() == [("scale", "against its fastest yet, 1,741 RPM")]  # named under the ring
+    low_rail = Reading("v", board, "+12V", Kind.VOLTAGE, 11.0, typical_low=11.4, typical_high=12.6)
+    dial.set_reading(low_rail, False, scale(row(low_rail, 11.0)))
+    assert dial.legend() == [("scale", "typical 11.400–12.600 V · now below it")]  # not an empty ring for 0 V
+    high_rail = Reading("v", board, "+12V", Kind.VOLTAGE, 12.9, typical_low=11.4, typical_high=12.6)
+    dial.set_reading(high_rail, False, scale(row(high_rail, 12.9)))
+    assert dial.legend() == [("scale", "typical 11.400–12.600 V · now above it")]
+    clock = Reading("k", board, "Clock", Kind.CLOCK, 800.0)
+    assert scale(row(clock, 4800.0)) == RingScale(0.0, 4800.0, "against its highest yet, 4,800 MHz")
+
+
+def test_same_device_puts_a_fans_control_first_and_leaves_the_cores_to_a_shown_strip() -> None:
+    from corewatch.gui.focus import related_rows
+    from corewatch.model import Reading, Row, Stats
+
+    def row(reading: Reading) -> Row:
+        return Row(reading, Stats())
+
+    board, cpu = "Motherboard", "CPU"
+    rows = [
+        row(temp("t1", board, 30.0, label="SYSTIN")),
+        row(Reading("f2", "Fans", "Fan 2", Kind.FAN, 1500.0, origin=board)),
+        row(Reading("f7", "Fans", "Fan 7", Kind.FAN, 3000.0, origin=board)),
+        row(Reading("p2", "Fans", "Fan control 2", Kind.FAN_DUTY, 69.0, companion="f2", origin=board)),
+        row(Reading("v", board, "+12V", Kind.VOLTAGE, 12.0)),
+        row(temp("pkg", cpu, 50.0, label="CPU package")),
+        row(temp("c0", cpu, 45.0, label="P-core 0")),
+        row(Reading("k0", cpu, "P-core 0 clock", Kind.CLOCK, 4800.0)),
+        row(load("l", cpu, 5.0, label="CPU load")),
+    ]
+    shown, total = related_rows(rows[1], rows)
+    assert [r.reading.key for r in shown] == ["p2", "f7", "t1", "v"] and total == 4  # its control, fans, the rest
+    shown, _ = related_rows(rows[3], rows)
+    assert shown[0].reading.key == "f2"  # a control's fan first
+    shown, total = related_rows(rows[5], rows, cores_shown=True)
+    assert [r.reading.key for r in shown] == ["l"] and total == 1  # the cores are in their strip
+    shown, total = related_rows(rows[5], rows)  # too few cores for a strip: they're shown here
+    assert [r.reading.key for r in shown] == ["c0", "k0", "l"] and total == 3
+    shown, total = related_rows(rows[0], rows, limit=2)
+    assert len(shown) == 2 and total == 4
+
+
+def test_the_focus_view_charges_a_stall_as_time_past_a_limit() -> None:
+    from corewatch.gui.focus import focus_stats
+    from corewatch.model import Reading, Row, Stats
+
+    stats = Stats()
+    stats.add(0.0, 0.0, Status.WARNING)
+    stats.add(0.0, 14.0, Status.WARNING)
+    stalled = Row(Reading("f", "Fans", "Fan 1", Kind.FAN, 0.0, stall_duty=100.0), stats)
+    past = next(s for s in focus_stats(stalled, 14.0, False, lambda t: t) if s.title == "Past a limit")
+    assert (past.value, past.note) == ("14 s", "stalled")
+    calm = Row(Reading("f", "Fans", "Fan 1", Kind.FAN, 900.0), Stats())
+    past = next(s for s in focus_stats(calm, 14.0, False, lambda t: t) if s.title == "Past a limit")
+    assert (past.value, past.note) == ("no limit", "none reported")
+
+
+def test_a_long_ring_note_wraps_to_the_dials_width_instead_of_being_cut_off(qtbot) -> None:  # type: ignore[no-untyped-def]
+    from PySide6.QtGui import QFontMetrics
+
+    from corewatch.gui.focus import Dial, RingScale, wrap_lines
+    from corewatch.gui.theme import BODY_FONT, font
+    from corewatch.model import Reading
+
+    metrics = QFontMetrics(font(BODY_FONT, 13))
+    note = "between its limits, 10.200–13.800 V · now below it"
+    lines = wrap_lines(note, metrics, 260, 2)
+    assert len(lines) == 2 and " ".join(lines) == note  # all of it, on two lines
+    assert all(metrics.horizontalAdvance(line) <= 260 for line in lines)
+    assert wrap_lines("short", metrics, 260, 2) == ["short"]
+    squeezed = wrap_lines(note, metrics, 120, 2)
+    assert len(squeezed) == 2 and squeezed[1].endswith("…")  # more than two lines hold: cut short, said so
+    dial = Dial()
+    qtbot.addWidget(dial)
+    dial.set_reading(Reading("t", "CPU", "CPU", Kind.TEMPERATURE, 50.0, high=80.0), False)
+    limits = dial.sizeHint().height()
+    dial.set_reading(Reading("v", "B", "V", Kind.VOLTAGE, 9.0), False, RingScale(10.2, 13.8, note))
+    assert dial.sizeHint().height() == limits + metrics.height()  # room for the second line

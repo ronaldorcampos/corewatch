@@ -8,7 +8,7 @@ import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 
-from PySide6.QtCore import QEvent, QPointF, QRectF, QSize, Qt, Signal
+from PySide6.QtCore import QEvent, QPoint, QPointF, QRectF, QSize, Qt, Signal
 from PySide6.QtGui import (
     QColor,
     QFocusEvent,
@@ -280,7 +280,7 @@ def _caption_font() -> QFont:
     return font(DISPLAY_FONT, 10, QFont.Weight.DemiBold, 1.5)
 
 
-def _draw(
+def draw_text(
     painter: QPainter, rect: QRectF, text: str, qfont: QFont, color: QColor | str, align: Qt.AlignmentFlag
 ) -> None:
     painter.setFont(qfont)
@@ -339,7 +339,7 @@ class TileView(CompactView):
         title_font, value_font, unit_font = self._fonts()
         inner = rect.adjusted(px(12), px(8), -px(12), -px(8))
         title_h = QFontMetrics(title_font).height()
-        _draw(
+        draw_text(
             painter,
             QRectF(inner.left(), inner.top(), inner.width(), title_h),
             item.title.upper(),
@@ -349,10 +349,10 @@ class TileView(CompactView):
         )
         value_box = QRectF(inner.left(), inner.top() + title_h, inner.width(), inner.height() - title_h)
         color = theme.value_color(item.status)
-        _draw(painter, value_box, item.value, value_font, color, Qt.AlignmentFlag.AlignLeft)
+        draw_text(painter, value_box, item.value, value_font, color, Qt.AlignmentFlag.AlignLeft)
         if item.unit:
             advance = QFontMetrics(value_font).horizontalAdvance(item.value) + px(5)
-            _draw(
+            draw_text(
                 painter,
                 value_box.adjusted(advance, 0, 0, 0),
                 item.unit,
@@ -486,39 +486,43 @@ def _fan_name(reading: Reading) -> str:
     return reading.label.removesuffix(f" ({device.split(' · ', 1)[-1]})")
 
 
+def fan_duties(rows: Sequence[Row]) -> dict[str, Row]:
+    """Each fan's control setting (its duty, in %), by the fan's key."""
+    duty_by_fan: dict[str, Row] = {}
+    for row in rows:
+        if row.reading.kind is not Kind.FAN_DUTY:
+            continue
+        if row.reading.companion:  # a board's "Fan control 2" names its "Fan 2"
+            duty_by_fan[row.reading.companion] = row
+        else:  # a graphics card's "GPU fan 1 speed" goes with its "GPU fan 1"
+            fan = next(
+                (
+                    r
+                    for r in rows
+                    if r.reading.kind is Kind.FAN
+                    and r.reading.origin == row.reading.origin
+                    and f"{_fan_name(r.reading)} speed" == _fan_name(row.reading)
+                ),
+                None,
+            )
+            if fan is not None:
+                duty_by_fan.setdefault(fan.reading.key, row)
+    # A duty counts as paired only when its fan is here: a pump header with no speed input
+    # names a fan that doesn't exist, and is shown on its own like a duty-only fan.
+    fans = {row.reading.key for row in rows if row.reading.kind is Kind.FAN}
+    return {fan: duty for fan, duty in duty_by_fan.items() if fan in fans}
+
+
 class FanView(CompactView):
     """Every fan: its speed, a ten-step bar of how hard it's working, and where it is."""
 
     ACCESSIBLE_NAME = "Fans"
     ROW_H = 58
-    SEGMENTS = 10
-    HOT_FROM = 8  # the last two steps turn amber
 
     def load(self, data: ViewData) -> list[Item]:
         rows = list(data.rows)
-        duty_by_fan: dict[str, Row] = {}
-        for row in rows:
-            if row.reading.kind is not Kind.FAN_DUTY:
-                continue
-            if row.reading.companion:  # a board's "Fan control 2" names its "Fan 2"
-                duty_by_fan[row.reading.companion] = row
-            else:  # a graphics card's "GPU fan 1 speed" goes with its "GPU fan 1"
-                fan = next(
-                    (
-                        r
-                        for r in rows
-                        if r.reading.kind is Kind.FAN
-                        and r.reading.origin == row.reading.origin
-                        and f"{_fan_name(r.reading)} speed" == _fan_name(row.reading)
-                    ),
-                    None,
-                )
-                if fan is not None:
-                    duty_by_fan.setdefault(fan.reading.key, row)
-        # A duty counts as paired only when its fan is here: a pump header with no speed input
-        # names a fan that doesn't exist, and is shown on its own like a duty-only fan.
-        fans = {row.reading.key for row in rows if row.reading.kind is Kind.FAN}
-        paired = {duty.reading.key for fan, duty in duty_by_fan.items() if fan in fans}
+        duty_by_fan = fan_duties(rows)
+        paired = {duty.reading.key for duty in duty_by_fan.values()}
         items: list[Item] = []
         for row in rows:
             if row.reading.kind is Kind.FAN_DUTY and row.reading.key not in paired:
@@ -602,7 +606,7 @@ class FanView(CompactView):
         unit_w = QFontMetrics(unit_font).horizontalAdvance(item.unit)
         rpm_w = QFontMetrics(rpm_font).horizontalAdvance(item.rpm)
         line = QRectF(x, top, width, name_h)
-        _draw(
+        draw_text(
             painter,
             line.adjusted(0, 0, -(rpm_w + unit_w + px(10)), 0),
             item.name,
@@ -610,8 +614,8 @@ class FanView(CompactView):
             theme.text,
             Qt.AlignmentFlag.AlignLeft,
         )
-        _draw(painter, line, item.unit, unit_font, theme.muted, Qt.AlignmentFlag.AlignRight)
-        _draw(
+        draw_text(painter, line, item.unit, unit_font, theme.muted, Qt.AlignmentFlag.AlignRight)
+        draw_text(
             painter,
             line.adjusted(0, 0, -(unit_w + px(5)), 0),
             item.rpm,
@@ -620,16 +624,11 @@ class FanView(CompactView):
             Qt.AlignmentFlag.AlignRight,
         )
         bar_top = top + name_h + px(3)
-        gap = px(3)
-        step = (width - gap * (self.SEGMENTS - 1)) / self.SEGMENTS
-        lit = round((item.share or 0.0) * self.SEGMENTS)
-        for index in range(self.SEGMENTS):
-            color = theme.edge
-            if index < lit:
-                # Amber means driven hard; a bar guessed from a fan's own top speed can't say.
-                color = theme.warning if index >= self.HOT_FROM and item.driven else theme.accent
-            painter.fillRect(QRectF(x + index * (step + gap), bar_top, step, px(6)), QColor(color))
-        _draw(
+        # Amber means driven hard; a bar guessed from a fan's own top speed can't say.
+        draw_segments(
+            painter, QRectF(x, bar_top, width, px(6)), item.share or 0.0, theme, HARD if item.driven else None
+        )
+        draw_text(
             painter,
             QRectF(x, bar_top + px(6) + px(4), width, sub_h),
             item.where,
@@ -637,6 +636,36 @@ class FanView(CompactView):
             theme.muted,
             Qt.AlignmentFlag.AlignLeft,
         )
+
+
+SEGMENTS = 10
+HARD = 0.8  # a bar's last two steps, where a fan or a load counts as driven hard
+
+
+def draw_segments(
+    painter: QPainter,
+    rect: QRectF,
+    share: float,
+    theme: Theme,
+    warn_from: float | None = None,
+    crit_from: float | None = None,
+) -> None:
+    """A bar of ten steps, lit as far as ``share`` (0 to 1) of it. A lit step reaching past
+    ``warn_from`` (a share too) turns amber, and past ``crit_from`` red."""
+    gap = px(3)
+    step = (rect.width() - gap * (SEGMENTS - 1)) / SEGMENTS
+    lit = 0 if math.isnan(share) else round(min(max(share, 0.0), 1.0) * SEGMENTS)  # a NaN reading: unlit
+    for index in range(SEGMENTS):
+        color = theme.edge
+        if index < lit:
+            reach = (index + 1) / SEGMENTS - 1e-9  # where the step ends
+            if crit_from is not None and reach > crit_from:
+                color = theme.critical
+            elif warn_from is not None and reach > warn_from:
+                color = theme.warning
+            else:
+                color = theme.accent
+        painter.fillRect(QRectF(rect.left() + index * (step + gap), rect.top(), step, rect.height()), QColor(color))
 
 
 def _paint_fan(painter: QPainter, center: QPointF, radius: float, color: QColor) -> None:
@@ -730,9 +759,9 @@ class StorageView(CompactView):
         line = QRectF(x, top, width, name_h)
         model_w = QFontMetrics(name_font).horizontalAdvance(item.model)
         room = width - value_w - px(12)
-        _draw(painter, QRectF(x, top, room, name_h), item.model, name_font, theme.text, Qt.AlignmentFlag.AlignLeft)
+        draw_text(painter, QRectF(x, top, room, name_h), item.model, name_font, theme.text, Qt.AlignmentFlag.AlignLeft)
         if item.name and model_w + px(8) < room:
-            _draw(
+            draw_text(
                 painter,
                 QRectF(x + model_w + px(8), top, room - model_w - px(8), name_h),
                 item.name,
@@ -740,7 +769,7 @@ class StorageView(CompactView):
                 theme.muted,
                 Qt.AlignmentFlag.AlignLeft,
             )
-        _draw(painter, line, value, value_font, theme.value_color(item.status), Qt.AlignmentFlag.AlignRight)
+        draw_text(painter, line, value, value_font, theme.value_color(item.status), Qt.AlignmentFlag.AlignRight)
 
         scale = max(self.SCALE, (item.crit or item.high or 0.0) + 5)
         bar = QRectF(x, top + name_h + px(5), width, px(5))
@@ -758,7 +787,7 @@ class StorageView(CompactView):
             parts.append(f"warns at {format_value(Kind.TEMPERATURE, item.high, fahrenheit)}")
         if item.hottest is not None:
             parts.append(f"hottest sensor {format_value(Kind.TEMPERATURE, item.hottest, fahrenheit)}")
-        _draw(
+        draw_text(
             painter,
             QRectF(x, bar.bottom() + px(4), width, sub_h),
             " · ".join(parts),
@@ -820,7 +849,7 @@ class NetworkView(CompactView):
         title_w = max(title_w, px(60))
         value_w = QFontMetrics(value_font).horizontalAdvance("888.8 MB/s")
         x = rect.left() + px(10)
-        _draw(
+        draw_text(
             painter,
             QRectF(x, rect.top(), title_w, rect.height()),
             item.title.upper(),
@@ -833,7 +862,7 @@ class NetworkView(CompactView):
         )
         if item.row is not None and spark.width() > 0:
             draw_sparkline(painter, spark, item.row, self.data.now, self.data.gap, theme)
-        _draw(
+        draw_text(
             painter,
             QRectF(rect.right() - px(10) - value_w, rect.top(), value_w, rect.height()),
             item.value,
@@ -843,7 +872,7 @@ class NetworkView(CompactView):
         )
 
     def paint_footer(self, painter: QPainter, rect: QRectF, theme: Theme) -> None:
-        _draw(
+        draw_text(
             painter,
             rect.adjusted(px(10), px(4), -px(10), 0),
             self.temperatures(),
@@ -904,9 +933,18 @@ class CardDeck(QWidget):
         self.cards: list[tuple[QWidget, bool]] = []  # (card, wide)
         self.needs: dict[int, int] = {}  # id(card) -> the width it needs beside another
         self._arrangement: tuple[tuple[int, int, int, int, int], ...] | None = None
+        # Where a dragged panel would land, while one is dragged in edit-layout mode.
+        self.drop_line = QWidget(self)
+        self.drop_line.setObjectName("dropLine")
+        self.drop_line.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        self.drop_line.setVisible(False)
+        self._drop: tuple[QWidget, bool] | None = None
+        self._drop_wide = False  # whether the panel dragged is a wide one
 
     def set_cards(self, cards: Sequence[tuple[QWidget, bool]]) -> None:
         self.cards = list(cards)
+        if self._drop is not None and not any(self._drop[0] is card for card, _ in self.cards):
+            self.mark_drop(None)  # its card is gone
         for card, _ in self.cards:
             if card.parentWidget() is not self:
                 card.setParent(self)  # a card with no parent would open as a window of its own
@@ -965,6 +1003,70 @@ class CardDeck(QWidget):
         for column in range(columns):
             self.grid.setColumnStretch(column, 1)
 
+    def drop_at(self, point: QPoint, wide: bool = False) -> tuple[QWidget, bool] | None:
+        """The shown card a panel (``wide`` or not) dropped at ``point`` would land beside, and
+        whether before it (over its upper half, or its left half when they'd sit side by side)
+        or after it. None away from the deck."""
+        if not self.rect().adjusted(-40, -40, 40, 40).contains(point):
+            return None
+        shown = [card for card, *_ in self.arrangement(self.width())]
+        if not shown:
+            return None
+
+        def distance(card: QWidget) -> int:
+            rect = card.geometry()
+            dx = max(rect.left() - point.x(), 0, point.x() - rect.right())
+            dy = max(rect.top() - point.y(), 0, point.y() - rect.bottom())
+            return dx + dy
+
+        card = min(shown, key=distance)  # the one under the pointer, or the nearest
+        middle = card.geometry().center()
+        if self._beside(card, wide):  # its left half is before it, its right after
+            return card, point.x() < middle.x()
+        return card, point.y() < middle.y()
+
+    def _beside(self, card: QWidget, wide: bool) -> bool:
+        """Whether a panel (``wide`` or not) dropped next to ``card`` would sit beside it: both
+        half-width, two to a line. Not whether ``card`` has a neighbour now: one alone on its
+        line (the next is wide, or it's the last) takes a half-width panel beside it too."""
+        if wide:
+            return False
+        placed = self.arrangement(self.width())
+        span = next((cs for c, _, _, _, cs in placed if c is card), None)
+        return span == 1 and self.columns_for(self.width()) == 2
+
+    def mark_drop(self, target: tuple[QWidget, bool] | None, wide: bool = False) -> None:
+        """Draw the drop line before or after a card, or take it away (None): across the card
+        over or under it, or, where the panel dragged (``wide`` or not) would sit beside it, down
+        its side."""
+        self._drop = target if target is not None and any(target[0] is c for c, _ in self.cards) else None
+        self._drop_wide = wide
+        if self._drop is None:
+            self.drop_line.setVisible(False)
+            return
+        card, before = self._drop
+        if wide and before and self._beside(card, False):
+            # A wide panel before the right-hand card of a pair goes under the left-hand one,
+            # so the line goes there too: the spot its lower half marks.
+            placed = self.arrangement(self.width())
+            spot = next(((r, c) for w, r, c, *_ in placed if w is card), None)
+            left = next((w for w, r, c, *_ in placed if spot == (r, c + 1)), None)  # None in column 0
+            if left is not None:
+                card, before = left, False
+        rect = card.geometry()
+        thickness = 4
+        ahead, behind = (self.SPACING + thickness) // 2, (self.SPACING - thickness) // 2  # in the gap
+        if self._beside(card, wide):
+            x = rect.left() - ahead if before else rect.right() + behind
+            x = min(max(x, 0), self.width() - thickness)
+            self.drop_line.setGeometry(x, rect.top(), thickness, rect.height())
+        else:
+            y = rect.top() - ahead if before else rect.bottom() + behind
+            y = min(max(y, 0), self.height() - thickness)  # after the last card: still inside the deck
+            self.drop_line.setGeometry(rect.left(), y, rect.width(), thickness)
+        self.drop_line.setVisible(True)
+        self.drop_line.raise_()
+
     def minimumSizeHint(self) -> QSize:
         # One card's width, not the current lines side by side, or the deck could never narrow
         # enough to put them one under another. And the height its cards take at the width it
@@ -980,3 +1082,5 @@ class CardDeck(QWidget):
     def resizeEvent(self, event: QResizeEvent) -> None:
         super().resizeEvent(event)
         self.reflow()
+        if self._drop is not None:  # the cards moved under it
+            self.mark_drop(self._drop, self._drop_wide)

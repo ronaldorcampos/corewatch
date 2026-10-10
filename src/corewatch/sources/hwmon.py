@@ -70,6 +70,10 @@ AMDGPU_LABELS = {
 # Intel's GPU drivers. Only discrete cards (Arc) get a hwmon chip; integrated graphics has none.
 INTEL_GPU_DRIVERS = {"i915", "xe"}
 GPU_DRIVERS = {"amdgpu", "radeon", "nouveau", *INTEL_GPU_DRIVERS}
+# Drivers whose fan control reads the setting last asked for, not what the fan gets: thinkpad_acpi
+# reports 100 % in its default automatic mode while the firmware has stopped a cool laptop's fan
+# (Documentation/admin-guide/laptops/thinkpad-acpi.rst). Never used to tell a stalled fan.
+SETPOINT_DRIVERS = {"thinkpad"}
 # Labels xe gives its sensors (drivers/gpu/drm/xe/xe_hwmon.c); i915 labels none of them.
 INTEL_GPU_TEMPERATURES = {
     "pkg": "GPU temperature",
@@ -184,6 +188,7 @@ class ChannelInfo:
     ratio_of: str | None = None
     empty_if_idle: bool = False
     integrated: bool = False  # an APU's graphics (see Reading.integrated)
+    setpoint: bool = False  # a fan control that reads what was asked for (see Reading.setpoint)
 
 
 @dataclass(frozen=True)
@@ -480,6 +485,7 @@ class HwmonSource:
             # which exist even while resting at 0 RPM.
             empty_if_idle=kind is Kind.FAN and not context.gpu,
             integrated=context.is_apu,
+            setpoint=kind is Kind.FAN_DUTY and context.name in SETPOINT_DRIVERS,
         )
 
     def _friendly_label(self, label: str, kind: Kind, channel: Channel, context: ChipContext) -> str:
@@ -541,4 +547,5 @@ class HwmonSource:
             empty_if_idle=info.empty_if_idle,
             cap=info.cap,
             integrated=info.integrated,
+            setpoint=info.setpoint,
         )

@@ -1,4 +1,5 @@
-"""The sensor list: one card per device, its sensors laid out in two columns."""
+"""The sensor list: one card per device, its sensors as rows with a bar each, in two columns
+on a wide card."""
 
 import math
 from collections.abc import Sequence
@@ -14,7 +15,6 @@ from PySide6.QtGui import (
     QMouseEvent,
     QPainter,
     QPaintEvent,
-    QPen,
 )
 from PySide6.QtWidgets import (
     QFrame,
@@ -27,50 +27,86 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from corewatch.gui.cards import CardView, ViewData
-from corewatch.gui.theme import BODY_FONT, DISPLAY_FONT, MONO_FONT, current_theme, font, paint_card
+from corewatch.gui.cards import HARD, CardView, ViewData, draw_segments, draw_text, fan_duties
+from corewatch.gui.layout import LayoutBar
+from corewatch.gui.theme import BODY_FONT, MONO_FONT, Theme, current_theme, font, paint_card, px
 from corewatch.gui.widgets import ElidedLabel, draw_sparkline
-from corewatch.model import Kind, Row, format_limit, format_value
-from corewatch.monitor import KIND_ORDER
+from corewatch.model import Kind, Reading, Row, cap_word, format_stall, format_typical, format_value
+from corewatch.monitor import FANS, KIND_ORDER
 
-COLUMNS = 2
+COLUMNS = 2  # on a wide card; a half-width card lists its sensors in one
 
-KIND_TITLES = {
-    Kind.TEMPERATURE: "Temperatures",
-    Kind.LOAD: "Load",
-    Kind.CLOCK: "Clocks",
-    Kind.POWER: "Power",
-    Kind.FAN: "Fan speed",
-    Kind.FAN_DUTY: "Fan control",
-    Kind.VOLTAGE: "Voltages",
-    Kind.CURRENT: "Current",
-    Kind.THROUGHPUT: "Traffic",
-}
-
-# Cell geometry, in pixels. The label takes whatever width is left.
+# Row geometry, before px() scaling. The name takes whatever the value doesn't need.
 PAD = 10
-GAP = 8
-SPARK_MIN_W = 96  # the sparkline gets every pixel the label doesn't need, never less than this
-STAT_PAD = 12  # breathing room added to the widest text in a numbers column
+GAP = 12
+MIN_LABEL_W = 140
+BAND_H = 12  # the bar, or the sparkline in its place
+ROW_H = 62
 STATS = ("value", "min", "max", "avg")
-STAT_TITLES = {"value": "Value", "min": "Min", "max": "Max", "avg": "Average"}
-MIN_LABEL_W = 96
-MAX_LABEL_W = 220  # longer names are elided rather than starving the sparkline
-# Smallest cell for typical numbers ("45.0 °C"); real cells grow to fit their own values.
-CELL_MIN_W = PAD * 2 + MIN_LABEL_W + SPARK_MIN_W + 4 * 64 + GAP * 5
+VALUE_MIN_W = 96  # room for a typical value ("45.0 °C"); real rows grow to fit their own
+SUB_MAX_W = 440  # the most a row's grey line asks for: a longer one is cut rather than widen the card
+# The smallest a row gets with typical numbers; real rows grow to fit their values and grey line.
+CELL_MIN_W = PAD * 2 + MIN_LABEL_W + GAP + VALUE_MIN_W
 COLUMN_GAP = 18
-HEADER_H = 24
-SUBHEAD_H = 28
-ROW_H = 30
+TEMPERATURE_SCALE = 90.0  # °C a full bar stands for, unless the sensor's limits go higher
 
 
-def short_label(row: Row) -> str:
-    """Under a "Load" or "Clocks" heading, "P-core 3 load" reads better as "P-core 3"."""
-    label = row.reading.label
-    for kind, suffix in ((Kind.LOAD, " load"), (Kind.CLOCK, " clock")):
-        if row.reading.kind is kind and label.endswith(suffix) and len(label) > len(suffix):
-            return label.removesuffix(suffix)
-    return label
+def bar_scale(reading: Reading) -> float | None:
+    """What a full bar stands for, in the reading's own unit, or None for a sensor with no
+    natural top (a voltage, a fan's speed): it gets its last minute drawn instead, except in
+    the Fans card (see ``fill_scale``)."""
+    kind = reading.kind
+    if kind is Kind.TEMPERATURE:
+        return max(TEMPERATURE_SCALE, (reading.crit or reading.high or 0.0) + 5)
+    if kind in (Kind.LOAD, Kind.FAN_DUTY):
+        return 100.0
+    if kind in (Kind.CLOCK, Kind.POWER) and reading.cap:
+        return reading.cap
+    return None
+
+
+def limit_text(reading: Reading, fahrenheit: bool) -> str:
+    """A sensor's limits as its row and tooltip name them, e.g. ``warns at 80.0 °C · critical at
+    100.0 °C``, or ``max clock 5,300 MHz``; a stalled fan says so first."""
+    f, parts = fahrenheit, [stall] if (stall := format_stall(reading)) else []
+    if reading.high is not None:
+        parts.append(f"warns at {format_value(reading.kind, reading.high, f)}")
+    if reading.crit is not None:
+        parts.append(f"critical at {format_value(reading.kind, reading.crit, f)}")
+    if reading.low is not None:
+        parts.append(f"low under {format_value(reading.kind, reading.low, f)}")
+    if reading.cap is not None:
+        word = "max clock" if reading.kind is Kind.CLOCK else cap_word(reading.kind)
+        parts.append(f"{word} {format_value(reading.kind, reading.cap, f)}")
+    typical = format_typical(reading, f)
+    return " · ".join([*parts, typical] if typical else parts)
+
+
+def split_unit(text: str) -> tuple[str, str]:
+    """``"1,614 RPM"`` -> ``("1,614", "RPM")``; a dash or a bare number keeps no unit."""
+    number, _, unit = text.rpartition(" ")
+    return (number, unit) if number else (text, "")
+
+
+def fill_scale(row: Row) -> float | None:
+    """What ``row``'s bar fills against in the Fans card, where every row has the card's stepped
+    bar: its natural top, else its warning limit, else the highest it has read this session (so
+    a fan's bar is its speed against its fastest yet)."""
+    reading = row.reading
+    for scale in (bar_scale(reading), reading.high, row.stats.maximum):
+        if scale is not None and scale > 0:
+            return scale
+    return None
+
+
+def bar_limits(reading: Reading, scale: float) -> tuple[float | None, float | None]:
+    """Where along a bar (as shares) its steps turn amber and red: at the sensor's limits, or,
+    for a fan's control, in the last two steps (driven hard), as the Fans card has it."""
+    warn = reading.high / scale if reading.high is not None else None
+    crit = reading.crit / scale if reading.crit is not None else None
+    if warn is None and crit is None and reading.kind is Kind.FAN_DUTY:
+        warn = HARD
+    return warn, crit
 
 
 @dataclass(frozen=True)
@@ -80,14 +116,18 @@ class Cell:
 
 
 class SensorGrid(QWidget):
-    """Paints a device's sensors as a grid of cells, grouped under one heading per kind."""
+    """Paints a device's sensors as rows, like the Storage and Fans cards: the name and value,
+    a bar filled against what the sensor can reach (or its last minute, when nothing caps it),
+    and its min, max, average and limits under that. Sorted by kind; two columns on a wide card."""
 
     selected = Signal(str)
     opened = Signal(str)  # a double-click: the sensor's focus view
     context_requested = Signal(str, QPoint)  # sensor key, global position
 
-    def __init__(self, parent: QWidget | None = None) -> None:
+    def __init__(self, parent: QWidget | None = None, stepped: bool = False) -> None:
         super().__init__(parent)
+        # The Fans card's list draws every row with the stepped bar its view has, for one look.
+        self.stepped = stepped
         self.setMouseTracking(True)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.rows: list[Row] = []
@@ -99,33 +139,35 @@ class SensorGrid(QWidget):
         self.gap = 5.0
         self._hover: str | None = None
         self._cells: list[Cell] = []
-        self._subheads: list[tuple[QRect, str]] = []
-        self._headers: list[QRect] = []
         self._layout_width = -1
-        # Width of each numbers column, sized to the widest text it has shown. It only grows
-        # (until the sensors or unit change) so columns don't jiggle as values tick over.
-        self.stat_widths: dict[str, int] = dict.fromkeys(STATS, 0)
-        self.label_width = MIN_LABEL_W
+        self._duties: dict[str, Row] = {}  # a fan's control setting, by the fan's key
+        # The widest value shown so far. It only grows (until the sensors or unit change), so a
+        # value ticking from 900 to 1,200 RPM doesn't make the card ask for a new width each time.
+        # The same for the widest grey line, up to SUB_MAX_W.
+        self.value_width = self.sub_width = 0
 
     # ----- data ---------------------------------------------------------------------
 
     def set_rows(self, rows: Sequence[Row], now: float, fahrenheit: bool, gap: float) -> None:
         keys_changed = [r.reading.key for r in rows] != [r.reading.key for r in self.rows]
         if keys_changed or fahrenheit != self.fahrenheit:
-            self.stat_widths = dict.fromkeys(STATS, 0)
+            self.value_width = self.sub_width = 0
         self.rows, self.now, self.fahrenheit, self.gap = list(rows), now, fahrenheit, gap
-        if keys_changed:
-            metrics = QFontMetrics(self._fonts()[0])  # the label font
-            longest = max((metrics.horizontalAdvance(short_label(r)) for r in self.rows), default=0)
-            self.label_width = max(MIN_LABEL_W, min(MAX_LABEL_W, longest + 12))
-        if self._fit_stat_widths() or keys_changed:
+        if self._fit_widths() or keys_changed:
             self._relayout()
         self.update()
 
-    def set_columns(self, columns: int) -> None:
-        self.columns = max(1, columns)
-        self._relayout()
+    def set_duties(self, duties: dict[str, Row]) -> None:
+        """Each fan's control setting, by the fan's key, paired among all the card's sensors: a
+        filter that shows a fan but not its control leaves its bar as it was."""
+        self._duties = duties
         self.update()
+
+    def set_columns(self, columns: int) -> None:
+        if max(1, columns) != self.columns:
+            self.columns = max(1, columns)
+            self._relayout()
+            self.update()
 
     def shown_stats(self) -> tuple[str, ...]:
         return STATS if self.show_min_max else tuple(name for name in STATS if name not in ("min", "max"))
@@ -133,6 +175,8 @@ class SensorGrid(QWidget):
     def set_show_min_max(self, show: bool) -> None:
         if show != self.show_min_max:
             self.show_min_max = show
+            self.sub_width = 0  # the grey line got shorter, or longer
+            self._fit_widths()
             self._relayout()
             self.update()
 
@@ -144,7 +188,7 @@ class SensorGrid(QWidget):
     def effective_columns(self, width: int | None = None) -> int:
         """Two columns, or one when the card is too narrow for two to fit."""
         width = self.width() if width is None else width
-        fit = max(1, (width + COLUMN_GAP) // (self.cell_min_width() + COLUMN_GAP))
+        fit = max(1, (width + px(COLUMN_GAP)) // (self.cell_min_width() + px(COLUMN_GAP)))
         return max(1, min(self.columns, fit))
 
     def blocks(self) -> list[tuple[Kind, list[Row]]]:
@@ -153,43 +197,70 @@ class SensorGrid(QWidget):
             grouped.setdefault(row.reading.kind, []).append(row)
         return sorted(grouped.items(), key=lambda item: KIND_ORDER.index(item[0]))
 
+    def _row(self, key: str) -> Row:
+        return next(r for r in self.rows if r.reading.key == key)
+
     def cell_texts(self, key: str) -> list[str]:
-        """What a cell shows: label, value, min, max, average (used for painting and tests)."""
-        row = next(r for r in self.rows if r.reading.key == key)
-        return [short_label(row), *(self._stat_text(row, name) for name in STATS)]
+        """A row's name, value, min, max and average (for tests and the tooltip)."""
+        row = self._row(key)
+        return [row.reading.label, *(self._stat_text(row, name) for name in STATS)]
+
+    def sub_text(self, key: str) -> str:
+        """The grey line under a row's bar: min, max (unless hidden) and average, then its limits,
+        e.g. ``min 30.0 · max 31.0 · avg 30.1 °C · warns at 80.0 °C``."""
+        row = self._row(key)
+        reading, f = row.reading, self.fahrenheit
+        names = [name for name in self.shown_stats() if name != "value"]
+        texts = [split_unit(self._stat_text(row, name)) for name in names]
+        if all(number == "—" for number, _ in texts):  # nothing read yet: no row of dashes
+            names, texts = [], []
+        parts: list[str] = []
+        if reading.kind is Kind.THROUGHPUT:  # each in its own unit: KB/s, MB/s
+            parts = [f"{name} {number} {unit}".rstrip() for name, (number, unit) in zip(names, texts, strict=True)]
+        elif texts:
+            unit = next((u for _, u in texts if u), "")
+            stats = " · ".join(f"{name} {number}" for name, (number, _) in zip(names, texts, strict=True))
+            parts = [f"{stats} {unit}".rstrip()]
+        limits = limit_text(reading, f)
+        return " · ".join([*parts, limits] if limits else parts)
 
     def cells(self) -> list[Cell]:
         return list(self._cells)
 
     # ----- geometry -----------------------------------------------------------------
 
-    def _fit_stat_widths(self) -> bool:
-        """Grow numbers columns to fit their widest text; True if any column changed."""
-        metrics = QFontMetrics(self._fonts()[2])  # bold: the widest rendering
-        header = QFontMetrics(self._fonts()[1])
-        changed = False
-        for name in STATS:
-            widest = header.horizontalAdvance(STAT_TITLES[name].upper())
-            for row in self.rows:
-                widest = max(widest, metrics.horizontalAdvance(self._stat_text(row, name)))
-            if widest + STAT_PAD > self.stat_widths[name]:
-                self.stat_widths[name] = widest + STAT_PAD
-                changed = True
-        return changed
+    def _fit_widths(self) -> bool:
+        """Grow the room for the widest value and the widest grey line; True if either grew."""
+        value_font, unit_font, sub_font = self._fonts()[1:4]
+        widest = sub = 0
+        for row in self.rows:
+            number, unit = split_unit(self._stat_text(row, "value"))
+            widest = max(
+                widest,
+                QFontMetrics(value_font).horizontalAdvance(number)
+                + (QFontMetrics(unit_font).horizontalAdvance(unit) + px(5) if unit else 0),
+            )
+            sub = max(sub, QFontMetrics(sub_font).horizontalAdvance(self.sub_text(row.reading.key)))
+        grew = widest > self.value_width or min(sub, px(SUB_MAX_W)) > self.sub_width
+        self.value_width = max(self.value_width, widest)
+        self.sub_width = max(self.sub_width, min(sub, px(SUB_MAX_W)))
+        return grew
 
     def cell_min_width(self) -> int:
-        shown = self.shown_stats()
-        return PAD * 2 + MIN_LABEL_W + SPARK_MIN_W + sum(self.stat_widths[n] for n in shown) + GAP * (len(shown) + 1)
+        # Wide enough for the name and value, and for the grey line, so its limits (last on it)
+        # aren't the part cut off: a card goes to one column, or a line of its own, first.
+        named = px(PAD * 2 + MIN_LABEL_W + GAP) + max(self.value_width, px(VALUE_MIN_W))
+        return max(named, px(PAD * 2) + self.sub_width)
 
-    def _fonts(self) -> tuple[QFont, QFont, QFont, QFont]:
-        """(label, header, value, other numbers): names in the body font, column and group
-        headings in spaced caps, numbers in the monospaced font (bold for the current value)."""
-        return (
-            font(BODY_FONT, 13),
-            font(DISPLAY_FONT, 10, QFont.Weight.DemiBold, 1.5),
-            font(MONO_FONT, 13, QFont.Weight.Bold),
-            font(MONO_FONT, 12),
-        )
+    @staticmethod
+    def _fonts() -> tuple[QFont, QFont, QFont, QFont]:
+        """(name, value, unit, the grey line): as the Storage and Fans cards have them."""
+        return font(BODY_FONT, 14), font(MONO_FONT, 14, QFont.Weight.Bold), font(MONO_FONT, 11), font(BODY_FONT, 12)
+
+    def row_height(self) -> int:
+        name, _, _, sub = self._fonts()
+        text = QFontMetrics(name).height() + px(4) + px(BAND_H) + px(3) + QFontMetrics(sub).height()
+        return max(px(ROW_H), text + px(12))
 
     def _stat_text(self, row: Row, name: str) -> str:
         kind, stats, f = row.reading.kind, row.stats, self.fahrenheit
@@ -199,24 +270,18 @@ class SensorGrid(QWidget):
     def _relayout(self) -> None:
         width = max(self.width(), self.cell_min_width())
         columns = self.effective_columns(width)
-        cell_w = (width - COLUMN_GAP * (columns - 1)) // columns
-        self._cells, self._subheads, self._headers = [], [], []
-        self._headers = [QRect(c * (cell_w + COLUMN_GAP), 0, cell_w, HEADER_H) for c in range(columns)]
-        y = HEADER_H
-        blocks = self.blocks()
-        for kind, rows in blocks:
-            if len(blocks) > 1:
-                self._subheads.append((QRect(0, y, width, SUBHEAD_H), f"{KIND_TITLES[kind]}  ·  {len(rows)}"))
-                y += SUBHEAD_H
-            # Fill top-to-bottom, then the next column, so each list reads straight down.
-            per_column = math.ceil(len(rows) / columns)
-            for index, row in enumerate(rows):
-                column, line = divmod(index, per_column)
-                rect = QRect(column * (cell_w + COLUMN_GAP), y + line * ROW_H, cell_w, ROW_H)
-                self._cells.append(Cell(row.reading.key, rect))
-            y += per_column * ROW_H
+        gap = px(COLUMN_GAP)
+        cell_w = (width - gap * (columns - 1)) // columns
+        height = self.row_height()
+        ordered = [row for _, rows in self.blocks() for row in rows]
+        # Fill top-to-bottom, then the next column, so the list reads straight down.
+        per_column = max(1, math.ceil(len(ordered) / columns))
+        self._cells = []
+        for index, row in enumerate(ordered):
+            column, line = divmod(index, per_column)
+            self._cells.append(Cell(row.reading.key, QRect(column * (cell_w + gap), line * height, cell_w, height)))
         self._layout_width = self.width()
-        self.setFixedHeight(y + 4)
+        self.setFixedHeight(min(len(ordered), per_column) * height + px(4))
 
     def resizeEvent(self, event: object) -> None:
         if self.width() != self._layout_width:
@@ -227,80 +292,96 @@ class SensorGrid(QWidget):
 
     # ----- painting -----------------------------------------------------------------
 
-    def _parts(self, rect: QRect) -> dict[str, QRect]:
-        """Split a cell into label | sparkline | value | min | max | average."""
-        x = rect.right() - PAD
-        parts = {}
-        for name in reversed(self.shown_stats()):
-            width = self.stat_widths[name]
-            parts[name] = QRect(x - width + 1, rect.top(), width, rect.height())
-            x -= width + GAP
-        # What's left is shared: the label takes what its longest name needs, the sparkline the rest.
-        left = rect.left() + PAD
-        remaining = max(0, x - left + 1)
-        label_w = max(MIN_LABEL_W, min(self.label_width, remaining - GAP - SPARK_MIN_W))
-        label_w = min(label_w, remaining)
-        parts["label"] = QRect(left, rect.top(), label_w, rect.height())
-        spark_w = max(0, remaining - label_w - GAP)
-        parts["spark"] = QRect(left + label_w + GAP, rect.top(), spark_w, rect.height())
-        return parts
-
     def paintEvent(self, event: QPaintEvent) -> None:
         theme = current_theme()
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        base, small, bold, numbers = self._fonts()
-        muted, text, border = QColor(theme.muted), QColor(theme.text), QColor(theme.edge)
-        right = Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
-        left = Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
-
-        painter.setFont(small)
-        painter.setPen(muted)
-        for header in self._headers:
-            parts = self._parts(header)
-            painter.drawText(parts["label"], left, "SENSOR")
-            painter.drawText(parts["spark"], left, "LAST 60 S")
-            for name in self.shown_stats():
-                painter.drawText(parts[name], right, STAT_TITLES[name].upper())
-
-        for rect, title in self._subheads:
-            painter.setFont(small)
-            painter.setPen(muted)
-            painter.drawText(rect.adjusted(PAD, 6, 0, 0), left, title.upper())
-            painter.setPen(QPen(border, 1))
-            painter.drawLine(rect.left(), rect.bottom(), rect.right(), rect.bottom())
-
         by_key = {r.reading.key: r for r in self.rows}
-        metrics = QFontMetrics(base)
         for cell in self._cells:
             row = by_key.get(cell.key)
             if row is None:
                 continue
-            rect = cell.rect
+            rect = QRectF(cell.rect)
             if cell.key == self.selected_key:  # tinted, with an accent bar down its left edge
-                band = QRectF(rect).adjusted(0, 1, 0, -1)
-                painter.fillRect(band, QColor(theme.accent_soft))
-                painter.fillRect(QRectF(band.left(), band.top(), 2, band.height()), QColor(theme.accent))
+                painter.fillRect(rect, QColor(theme.accent_soft))
+                painter.fillRect(QRectF(rect.left(), rect.top(), 2, rect.height()), QColor(theme.accent))
             elif cell.key == self._hover:
-                painter.fillRect(QRectF(rect).adjusted(0, 1, 0, -1), QColor(theme.raised))
-            selected = cell.key == self.selected_key
-            label, value, minimum, maximum, average = self.cell_texts(cell.key)
-            parts = self._parts(rect)
-            painter.setFont(base)
-            painter.setPen(QColor(theme.accent_text) if selected else text)
-            painter.drawText(
-                parts["label"], left, metrics.elidedText(label, Qt.TextElideMode.ElideRight, parts["label"].width())
-            )
-            draw_sparkline(painter, QRectF(parts["spark"]).adjusted(0, 7, 0, -7), row, self.now, self.gap, theme)
-            painter.setFont(bold)
-            painter.setPen(theme.value_color(row.reading.status))
-            painter.drawText(parts["value"], right, value)
-            painter.setFont(numbers)
-            painter.setPen(muted)
-            for name, content in (("min", minimum), ("max", maximum), ("avg", average)):
-                if name in parts:
-                    painter.drawText(parts[name], right, content)
+                painter.fillRect(rect, QColor(theme.raised))
+            self._paint_row(painter, rect, row, theme)
         painter.end()
+
+    def _paint_row(self, painter: QPainter, rect: QRectF, row: Row, theme: Theme) -> None:
+        reading = row.reading
+        name_font, value_font, unit_font, sub_font = self._fonts()
+        name_h, sub_h = QFontMetrics(name_font).height(), QFontMetrics(sub_font).height()
+        x, width = rect.left() + px(PAD), rect.width() - px(PAD * 2)
+        top = rect.top() + (rect.height() - (name_h + px(4) + px(BAND_H) + px(3) + sub_h)) / 2
+        left, right = Qt.AlignmentFlag.AlignLeft, Qt.AlignmentFlag.AlignRight
+        selected = reading.key == self.selected_key
+
+        number, unit = split_unit(self._stat_text(row, "value"))
+        unit_w = QFontMetrics(unit_font).horizontalAdvance(unit) if unit else 0
+        number_w = QFontMetrics(value_font).horizontalAdvance(number)
+        line = QRectF(x, top, width, name_h)
+        name_room = line.adjusted(0, 0, -(number_w + unit_w + px(5) + px(GAP)), 0)
+        draw_text(painter, name_room, reading.label, name_font, theme.accent_text if selected else theme.text, left)
+        if unit:
+            draw_text(painter, line, unit, unit_font, theme.muted, right)
+        draw_text(
+            painter,
+            line.adjusted(0, 0, -(unit_w + px(5) if unit else 0), 0),
+            number,
+            value_font,
+            theme.value_color(reading.status),
+            right,
+        )
+
+        band = QRectF(x, line.bottom() + px(4), width, px(BAND_H))
+        if self.stepped:
+            share, warn, crit = self._steps(row)
+            draw_segments(painter, QRectF(x, band.center().y() - px(3), width, px(6)), share, theme, warn, crit)
+        else:
+            self._paint_bar(painter, band, row, theme)
+
+        draw_text(
+            painter,
+            QRectF(x, band.bottom() + px(3), width, sub_h),
+            self.sub_text(reading.key),
+            sub_font,
+            theme.muted,
+            left,
+        )
+
+    def _steps(self, row: Row) -> tuple[float, float | None, float | None]:
+        """A stepped bar's share lit, and where it turns amber and red. A fan's speed shows how
+        hard it's set to work, as the card's view above has it."""
+        reading = row.reading
+        duty = self._duties.get(reading.key)
+        if duty is not None and duty.reading.value is not None:
+            return duty.reading.value / 100, HARD, None
+        scale = fill_scale(row)
+        if scale is None or reading.value is None:
+            return 0.0, None, None
+        return (reading.value / scale, *bar_limits(reading, scale))
+
+    def _paint_bar(self, painter: QPainter, band: QRectF, row: Row, theme: Theme) -> None:
+        """A bar filled against the sensor's natural top, with a tick where it starts to warn,
+        or, with nothing to fill against, its last minute."""
+        reading = row.reading
+        scale = bar_scale(reading)
+        if scale is None:
+            draw_sparkline(painter, band.adjusted(0, 1, 0, -1), row, self.now, self.gap, theme)
+            return
+        bar = QRectF(band.left(), band.center().y() - px(5) / 2, band.width(), px(5))
+        painter.fillRect(bar, QColor(theme.edge))
+        if reading.value is not None:
+            share = min(max(reading.value / scale, 0.0), 1.0)
+            painter.fillRect(
+                QRectF(bar.left(), bar.top(), bar.width() * share, bar.height()), theme.status(reading.status)
+            )
+        if reading.high is not None and reading.high > 0:  # past the bar's end: at its end, as Storage has it
+            mark = bar.left() + bar.width() * min(reading.high / scale, 1.0)
+            painter.fillRect(QRectF(mark - 1, bar.top() - px(3), 2, bar.height() + px(6)), QColor(theme.warning))
 
     # ----- interaction --------------------------------------------------------------
 
@@ -340,7 +421,7 @@ class SensorGrid(QWidget):
             if row is None:
                 QToolTip.hideText()
                 return True
-            limits = format_limit(row.reading, self.fahrenheit)
+            limits = limit_text(row.reading, self.fahrenheit)
             QToolTip.showText(event.globalPos(), row.reading.label + (f"\n{limits}" if limits else ""), self)
             return True
         return super().event(event)
@@ -367,6 +448,9 @@ class CategorySection(QFrame):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(14, 10, 14, 10)
         layout.setSpacing(6)
+        # In edit-layout mode this takes the header's place: the card's name, and how to move it.
+        # Made the first time it's wanted: every widget costs time each time the style is set.
+        self.layout_bar: LayoutBar | None = None
 
         self.header = QWidget()
         self.header.setObjectName("cardHeader")
@@ -394,7 +478,7 @@ class CategorySection(QFrame):
         self.view = view
         if view is not None:
             layout.addWidget(view)
-        self.grid = SensorGrid()
+        self.grid = SensorGrid(stepped=device == FANS)
         layout.addWidget(self.grid)
         layout.addStretch(1)  # beside a taller card, keep this one's content at the top
         self._sync()
@@ -403,6 +487,20 @@ class CategorySection(QFrame):
         painter = QPainter(self)
         paint_card(painter, QRectF(self.rect()), current_theme())
         painter.end()
+
+    def edit_bar(self) -> LayoutBar:
+        if self.layout_bar is None:
+            name, _, model = self.device.partition(" · ")
+            self.layout_bar = LayoutBar(name, model or self.count.text(), panel=self.device)
+            box = self.layout()
+            if isinstance(box, QVBoxLayout):
+                box.insertWidget(0, self.layout_bar)
+        return self.layout_bar
+
+    def set_editing(self, editing: bool) -> None:
+        if editing or self.layout_bar is not None:
+            self.edit_bar().setVisible(editing)
+        self.header.setVisible(not editing)
 
     def has_view(self) -> bool:
         """True while the compact view is what the card opens on (not while filtering: then the
@@ -431,6 +529,8 @@ class CategorySection(QFrame):
         self.filtering = filtering
         if self.view is not None:
             self.view.set_data(data)
+        if self.grid.stepped:
+            self.grid.set_duties(fan_duties(data.rows))
         self._sync()
 
     def set_selected(self, key: str | None) -> None:
@@ -440,4 +540,6 @@ class CategorySection(QFrame):
 
     def set_rows(self, rows: Sequence[Row], now: float, fahrenheit: bool, gap: float) -> None:
         self.count.setText(f"{len(rows)} sensor{'s' if len(rows) != 1 else ''}")
+        if self.layout_bar is not None and not self.device.partition(" · ")[2]:  # "Fans": its count
+            self.layout_bar.set_sub(self.count.text())
         self.grid.set_rows(rows, now, fahrenheit, gap)

@@ -205,3 +205,77 @@ def test_drives_share_one_storage_card_under_their_short_names() -> None:
     }
     assert gathered["n1"].reading.origin == "NVMe nvme1 · Samsung SSD 970"
     assert gathered["n0"].stats is rows[0].stats  # the same statistics, not a fresh start
+
+
+def test_a_fan_that_stands_still_while_driven_is_stalled_once_it_has_run() -> None:
+    from corewatch.model import Kind, Reading, Status
+
+    def board(rpm: float, duty: float, glitch: float = 0.0) -> list[Reading]:
+        return [
+            Reading("fan2", "Motherboard", "Fan 2", Kind.FAN, rpm, empty_if_idle=True),
+            Reading("pwm2", "Motherboard", "Fan control 2", Kind.FAN_DUTY, duty, companion="fan2"),
+            Reading("fan3", "Motherboard", "Fan 3", Kind.FAN, glitch, empty_if_idle=True),  # an empty header
+            Reading("pwm3", "Motherboard", "Fan control 3", Kind.FAN_DUTY, 100.0, companion="fan3"),
+            Reading("fan4", "Motherboard", "Fan 4", Kind.FAN, rpm),  # a laptop's, under its firmware
+            Reading("pwm4", "Motherboard", "Fan control 4", Kind.FAN_DUTY, 100.0, companion="fan4", setpoint=True),
+        ]
+
+    def gpu(rpm: float, duty: float, glitch: float = 0.0) -> list[Reading]:
+        return [
+            Reading("g/fan0", "GPU", "Fan 1 speed", Kind.FAN_DUTY, duty),
+            Reading("g/fan0/rpm", "GPU", "Fan 1", Kind.FAN, rpm),
+        ]
+
+    running = [(900.0, 60.0, 0.0)] * 3
+    script = [*running, (0.0, 60.0, 700.0), (0.0, 60.0, 0.0), (0.0, 30.0, 0.0), (0.0, 60.0, 0.0), (0.0, 60.0, 0.0)]
+    script += [(800.0, 60.0, 0.0)]
+    times = (0.0, 1.0, 2.0, 3.0, 13.0, 30.0, 31.0, 41.0, 42.0)
+    now = [0.0]
+    monitor = Monitor(
+        [FakeSource("board", [board(*step) for step in script]), FakeSource("gpu", [gpu(*step) for step in script])],
+        clock=lambda: now[0],
+    )
+    stalls = []
+    for at in times:
+        now[0] = at
+        by_key = {row.reading.key: row.reading for row in monitor.sample()}
+        stalls.append(tuple(by_key[key].stall_duty for key in ("fan2", "g/fan0/rpm", "fan3", "fan4")))
+    quiet = (None, None, None, None)
+    assert stalls == [
+        quiet,
+        quiet,
+        quiet,  # running: three samples in a row
+        quiet,  # just stopped: it may be starting up again. Fan 3's tach glitches to a speed once
+        (60.0, 60.0, None, None),  # 10 s at 0 RPM while asked 60 %; never a glitching header or a setpoint
+        quiet,  # its control eased to 30 %: resting by design
+        quiet,  # asked again: the 10 s start over
+        (60.0, 60.0, None, None),
+        quiet,  # spinning again
+    ]
+    stalled = Reading("f", "Fans", "Fan", Kind.FAN, 0.0, stall_duty=60.0)
+    assert stalled.status is Status.WARNING
+    assert Reading("f", "Fans", "Fan", Kind.FAN, None, stall_duty=60.0).status is Status.OK
+
+
+def test_a_stall_is_never_timed_across_a_gap_in_the_readings() -> None:
+    from corewatch.model import Kind, Reading
+
+    class Flaky(FakeSource):
+        def sample(self):  # type: ignore[no-untyped-def]
+            self.calls += 1
+            if self.calls in (5, 6):
+                raise OSError("device went away")
+            rpm = 900.0 if self.calls <= 3 else 0.0
+            return [
+                Reading("fan", "Motherboard", "Fan 1", Kind.FAN, rpm),
+                Reading("pwm", "Motherboard", "Fan control 1", Kind.FAN_DUTY, 60.0, companion="fan"),
+            ]
+
+    now = [0.0]
+    monitor = Monitor([Flaky("board", [[]])], clock=lambda: now[0])
+    seen = []
+    for at in (0.0, 1.0, 2.0, 3.0, 4.0, 40.0, 41.0, 51.0):  # stops at 3 s; gone 4-40 s; back standing
+        now[0] = at
+        rows = {row.reading.key: row.reading for row in monitor.sample()}
+        seen.append(rows["fan"].stall_duty if "fan" in rows else "gone")
+    assert seen == [None, None, None, None, "gone", "gone", None, 60.0]  # timed afresh from 41 s

@@ -35,12 +35,15 @@ from PySide6.QtWidgets import (
 from corewatch.gui.theme import DISPLAY_FONT, MONO_FONT, Theme, current_theme, font, paint_card, px
 from corewatch.model import (
     Kind,
+    Reading,
     Row,
     cap_word,
     format_delta,
     format_duration,
     format_limit,
+    format_stall,
     format_trend,
+    format_typical,
     format_value,
     to_fahrenheit,
 )
@@ -67,6 +70,8 @@ def value_range(values: Sequence[float], kind: Kind) -> tuple[float, float]:
     low, high = middle - span / 2 * 1.15, middle + span / 2 * 1.15
     if kind in (Kind.LOAD, Kind.FAN_DUTY, Kind.FAN, Kind.POWER, Kind.CLOCK, Kind.THROUGHPUT) and low < 0:
         low, high = 0.0, high - low  # these can't go negative; keep the span
+    if kind in (Kind.LOAD, Kind.FAN_DUTY) and high > 100.0 >= max(values):
+        low, high = max(0.0, low - (high - 100.0)), 100.0  # nor past full: keep the span below it
     return low, high
 
 
@@ -193,6 +198,41 @@ def draw_sparkline(painter: QPainter, rect: QRectF, row: Row, now: float, gap: f
     painter.restore()
 
 
+def point_label_box(
+    center: QPointF, width: float, height: float, above: bool, plot: QRectF, taken: Sequence[QRectF]
+) -> QRectF:
+    """Where a chart writes a point's label: over the dot (a peak) or under it (a low), kept
+    across the plot. A peak with no room over it (one at the chart's top, a load pegged at full)
+    or over a limit's name goes under its dot. A label under its dot goes under anything already
+    written there too: a limit's name, or a peak's label that went under its own dot."""
+    box = QRectF(center.x() - width / 2, center.y() + (-(height + 6) if above else 6), width, height)
+    box.moveLeft(min(max(box.left(), plot.left()), plot.right() - box.width()))
+    if above and (box.top() < 0 or any(box.intersects(name) for name in taken)):
+        box.moveTop(center.y() + 6)
+        above = False
+    if not above:
+        for name in sorted(taken, key=QRectF.top):
+            if box.intersects(name):
+                box.moveTop(name.bottom() + 2)
+    return box
+
+
+def limit_lines(reading: Reading, theme: Theme) -> list[tuple[float, str, str]]:
+    """The dashed lines a chart draws for ``reading``'s limits: (value, colour, name)."""
+    typical = "typical" if reading.typical_low is None else "typical high"
+    if reading.kind in (Kind.LOAD, Kind.FAN_DUTY):
+        typical = "full"
+    lines = (
+        (reading.high, theme.warning, "high"),
+        (reading.crit, theme.critical, "critical"),
+        (reading.low, theme.warning, "low"),
+        (reading.cap, theme.muted, cap_word(reading.kind)),  # informational: drawn, never alarming
+        (reading.typical_high, theme.muted, typical),  # filled in, not reported: the same
+        (reading.typical_low, theme.muted, "typical low"),
+    )
+    return [(limit, color, name) for limit, color, name in lines if limit is not None]
+
+
 class HistoryChart(QWidget):
     """A line chart of one sensor with gridlines, limits and lowest/highest markers.
 
@@ -276,7 +316,8 @@ class HistoryChart(QWidget):
         reading = self.row.reading
         values = [v for _, v in points]
         if self.focus:  # the limits stay in view, so you see how close the sensor runs to them
-            values += [limit for limit in (reading.low, reading.high, reading.crit, reading.cap) if limit is not None]
+            limits = (reading.low, reading.high, reading.crit, reading.cap, reading.typical_low, reading.typical_high)
+            values += [limit for limit in limits if limit is not None]
         return value_range(values, reading.kind)
 
     def _fahrenheit_axis(self, kind: Kind) -> bool:
@@ -361,14 +402,9 @@ class HistoryChart(QWidget):
             zone.setAlpha(14)
             painter.fillRect(QRectF(plot.topLeft(), QPointF(plot.right(), to_xy(start, reading.crit).y())), zone)
         named = font(DISPLAY_FONT, 9, QFont.Weight.DemiBold, 1.5)
-        taken: list[QRectF] = []  # where the limits' names went, for the peak's label to keep clear of
-        for limit, color, name in (
-            (reading.high, theme.warning, "high"),
-            (reading.crit, theme.critical, "critical"),
-            (reading.low, theme.warning, "low"),
-            (reading.cap, theme.muted, cap_word(reading.kind)),  # informational: drawn, never alarming
-        ):
-            if limit is not None and low <= limit <= high:
+        taken: list[QRectF] = []  # where the limits' names and the peak's label went, for labels to keep clear of
+        for limit, color, name in limit_lines(reading, theme):
+            if low <= limit <= high:
                 pen = QPen(QColor(color), 1, Qt.PenStyle.DashLine)
                 painter.setPen(pen)
                 y = to_xy(start, limit).y()
@@ -438,13 +474,10 @@ class HistoryChart(QWidget):
             if self.focus and text == "max":  # the peak, and when it was
                 label = f"peak {format_value(kind, point[1], self.fahrenheit)} · {_clock(point[0], self.to_wall)}"
             above = text == "max"
-            width = metrics.horizontalAdvance(label) + 8
-            box = QRectF(center.x() - width / 2, center.y() + (-(text_height + 6) if above else 6), width, text_height)
-            box.moveLeft(min(max(box.left(), plot.left()), plot.right() - box.width()))
-            if above and any(box.intersects(name) for name in taken):  # a peak at a limit: under its dot
-                box.moveTop(center.y() + 6)
+            box = point_label_box(center, metrics.horizontalAdvance(label) + 8, text_height, above, plot, taken)
             if lowest is not highest or above:
                 painter.drawText(box, Qt.AlignmentFlag.AlignHCenter, label)
+                taken.append(box)
 
         # Hover: a guide line, the nearest reading highlighted, and its value and time.
         hovered = self.hovered_point()
@@ -845,7 +878,9 @@ class DetailPanel(QFrame):
         if color != self._value_color:  # restyling re-polishes the label; only do it on a change
             self._value_color = color
             self.value.setStyleSheet(f"color: {color};")
-        has_limits = reading.high is not None or reading.low is not None or reading.crit is not None
+        # A fan's stalls count as time past a limit, though it has none.
+        stalled = kind is Kind.FAN and stats.seconds_warning > 0
+        has_limits = reading.high is not None or reading.low is not None or reading.crit is not None or stalled
         values = {
             "now": format_value(kind, reading.value, f),
             "average": format_value(kind, stats.average, f),
@@ -860,5 +895,11 @@ class DetailPanel(QFrame):
         }
         for key, text in values.items():
             self.stat_values[key].setText(text)
-        limits = format_limit(reading, f)
-        self.limits.setText(f"Limits reported by the hardware: {limits}" if limits else "")
+        limits, typical = format_limit(reading, f), format_typical(reading, f)
+        if limits:
+            text = f"Limits reported by the hardware: {limits}"
+        else:
+            text = f"The hardware reports no limits; {typical}" if typical else ""
+        if stall := format_stall(reading):
+            text = f"{stall[:1].upper()}{stall[1:]}. {text}".strip()
+        self.limits.setText(text)

@@ -317,3 +317,19 @@ def test_a_third_temperature_limit_only_remaps_when_there_is_no_warning_limit(tm
     )
     [reading] = source.sample()
     assert (reading.high, reading.crit) == (70.0, 85.0)  # its own warning and critical limits stay
+
+
+def test_a_thinkpads_fan_control_is_a_setpoint_and_a_boards_is_not(tmp_path: Path, proc_root: Path) -> None:
+    source = make_source(
+        tmp_path,
+        proc_root,
+        {
+            "hwmon5/name": "thinkpad",
+            "hwmon5/fan1_input": "0",  # stopped by the firmware while cool
+            "hwmon5/pwm1": "255",  # yet reads 100 % in automatic mode
+            "hwmon5/pwm1_enable": "2",
+            **nct_files(),
+        },
+    )
+    setpoints = {r.key: r.setpoint for r in source.sample() if r.kind is Kind.FAN_DUTY}
+    assert setpoints == {"hwmon/thinkpad@hwmon5/pwm1": True, "hwmon/nct6798@hwmon8/pwm2": False}

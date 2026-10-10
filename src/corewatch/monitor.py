@@ -7,6 +7,7 @@ from dataclasses import dataclass, replace
 
 from corewatch.model import Kind, Reading, Row, Stats, Status
 from corewatch.sources.base import Source
+from corewatch.typical import with_typical
 
 # Within a device, show sensors in this order regardless of which source produced them.
 KIND_ORDER = [
@@ -25,6 +26,14 @@ DEVICE_ORDER = ["CPU", "Fans", "GPU", "Motherboard", "Memory", "NVMe", "Disk", "
 FANS = "Fans"
 STORAGE = "Storage"
 STORAGE_PREFIXES = ("NVMe", "Disk")
+# A fan that has spun before is stalled once it reads 0 RPM for this long while its control
+# asks at least this much. Below it a fan may rest by design (a graphics card's zero-RPM mode,
+# a board's fan stop), and a fan starting from rest takes a second or two to report a speed.
+STALL_DUTY = 40.0
+STALL_SECONDS = 10.0
+# A fan is watched for stalls once it has read a speed this many samples in a row: an empty
+# header's tachometer can glitch to a speed once, and must not be taken for a fan.
+RUNNING_SAMPLES = 3
 
 
 @dataclass(frozen=True)
@@ -56,6 +65,13 @@ class Monitor:
         # Fans seen spinning at least once. Unlike the statistics, Reset doesn't clear this:
         # a fan that spun and then stopped must never be mistaken for an empty header.
         self.spun_keys: set[str] = set()
+        # Per source: its fans standing still while driven, and since when. Rebuilt from each
+        # sample, and dropped when the source fails, so a time is only ever from samples in a row.
+        self._standing_since: dict[str, dict[str, float]] = {}
+        self._spinning_for: dict[str, int] = {}  # samples in a row each fan has read a speed
+        # Fans that have run steadily (RUNNING_SAMPLES): only these are watched for stalls. Like
+        # spun_keys, Reset doesn't clear it.
+        self.running_keys: set[str] = set()
         self._errors: dict[str, str] = {}
         self._notes: list[str] = []
 
@@ -82,9 +98,10 @@ class Monitor:
         for name, readings, error in collected.results:
             if readings is None:
                 self._errors[name] = error or f"Could not read {name} sensors"
+                self._standing_since.pop(name, None)  # a gap: no stall is timed across it
                 continue
             self._errors.pop(name, None)
-            for reading in readings:
+            for reading in self._with_stalls(name, with_typical(readings), collected.at):
                 if reading.unused:
                     self.unused_keys.add(reading.key)
                 if reading.kind is Kind.FAN and reading.value:
@@ -93,6 +110,35 @@ class Monitor:
                 stats.add(reading.value, collected.at, reading.status)
                 rows.append(Row(reading, stats))
         return rows
+
+    def _with_stalls(self, source: str, readings: Sequence[Reading], now: float) -> list[Reading]:
+        """``source``'s ``readings``, each fan that has run steadily marked stalled while it has
+        stood still for ``STALL_SECONDS`` with its control at ``STALL_DUTY`` or more."""
+        controls = fan_controls(readings)
+        before = self._standing_since.get(source, {})
+        standing: dict[str, float] = {}
+        marked = []
+        for reading in readings:
+            if reading.kind is Kind.FAN and reading.value is not None:
+                streak = self._spinning_for.get(reading.key, 0) + 1 if reading.value else 0
+                self._spinning_for[reading.key] = streak
+                if streak >= RUNNING_SAMPLES:
+                    self.running_keys.add(reading.key)
+            control = controls.get(reading.key)
+            duty = control.value if control is not None and not control.setpoint else None
+            if (
+                reading.kind is Kind.FAN
+                and reading.value == 0
+                and reading.key in self.running_keys
+                and duty is not None
+                and duty >= STALL_DUTY
+            ):
+                since = standing[reading.key] = before.get(reading.key, now)
+                if now - since >= STALL_SECONDS:
+                    reading = replace(reading, stall_duty=duty)
+            marked.append(reading)
+        self._standing_since[source] = standing
+        return marked
 
     def sample(self) -> list[Row]:
         """Collect and ingest in one go, on the calling thread."""
@@ -154,6 +200,20 @@ def headline(rows: Sequence[Row]) -> Row | None:
             return row
     pool = cpu_temps or temps
     return max(pool, key=lambda r: r.reading.value or 0.0) if pool else None
+
+
+def fan_controls(readings: Sequence[Reading]) -> dict[str, Reading]:
+    """Each fan's control among one source's ``readings``, by the fan's key: a board's "Fan
+    control 2" names its fan, and a graphics card's "Fan 1 speed" goes with its "Fan 1"."""
+    fans = {(r.device, r.label): r.key for r in readings if r.kind is Kind.FAN}
+    controls = {}
+    for reading in readings:
+        if reading.kind is not Kind.FAN_DUTY:
+            continue
+        fan = reading.companion or fans.get((reading.device, reading.label.removesuffix(" speed")))
+        if fan is not None:
+            controls[fan] = reading
+    return controls
 
 
 def is_unused(row: Row, by_key: dict[str, Row], unused_keys: set[str], spun_keys: set[str]) -> bool:

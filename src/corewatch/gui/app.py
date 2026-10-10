@@ -11,6 +11,7 @@ from collections.abc import Callable
 from dataclasses import replace
 from importlib.resources import files
 from pathlib import Path
+from typing import Literal
 
 from PySide6.QtCore import (
     QByteArray,
@@ -37,16 +38,21 @@ from PySide6.QtGui import (
     QIcon,
     QKeySequence,
     QPainter,
+    QPainterPath,
     QPaintEvent,
+    QPen,
     QPixmap,
     QResizeEvent,
     QShortcut,
+    QTransform,
 )
 from PySide6.QtSvg import QSvgRenderer
 from PySide6.QtWidgets import (
     QApplication,
     QButtonGroup,
     QComboBox,
+    QFrame,
+    QHBoxLayout,
     QInputDialog,
     QLabel,
     QLineEdit,
@@ -68,9 +74,10 @@ from corewatch import autostart
 from corewatch.cli import MAX_INTERVAL, MIN_INTERVAL
 from corewatch.gui import single
 from corewatch.gui import theme as themes
-from corewatch.gui.cards import CardDeck, ViewData, card_rank, is_wide, view_for
-from corewatch.gui.focus import FocusView
-from corewatch.gui.overview import GaugeStrip, gauge_specs
+from corewatch.gui.cards import CardDeck, ViewData, card_rank, view_for
+from corewatch.gui.focus import MIN_CORES, FocusView, related_rows
+from corewatch.gui.layout import GAUGES, CardFrame, FlowRow, GaugePanel, Layout, LayoutBar
+from corewatch.gui.overview import HEAT_EDGES, GaugeStrip, core_groups, gauge_specs
 from corewatch.gui.sensors import CategorySection, SensorGrid
 from corewatch.gui.widgets import DetailPanel, chevron_icon, expand_icon, pencil_icon
 from corewatch.model import Kind, Row, Status, format_short, format_value
@@ -175,28 +182,71 @@ def tray_icon(light_panel: bool = False) -> QIcon:
     return icon
 
 
-def number_icon(text: str, status: Status) -> QIcon:
-    """A tray icon showing a number, like Core Temp does, coloured by status."""
-    pixmap = QPixmap(64, 64)
+# A pinned sensor's tray icon: its number in the panel's own colour over a rule that says how
+# it's doing. The rule turns amber once it's warm and the number turns red at critical.
+TrayLevel = Literal["normal", "warm", "critical", "none"]
+TRAY_RULES: dict[TrayLevel, str] = {"normal": "#22D3EE", "warm": "#F59E0B", "critical": "#FF5470", "none": "#3A4A60"}
+TRAY_CRITICAL_TEXT = "#FF5470"
+TRAY_SILENT_TEXT = {False: "#8CA3BF", True: "#5E7896"}  # a sensor that stopped reporting, by panel
+TRAY_TEXT = {False: "#FFFFFF", True: "#18181B"}  # on a dark panel, on a light one
+WARM_CELSIUS = HEAT_EDGES[1]  # where the heat map's warm band starts
+
+
+def tray_level(row: Row | None) -> TrayLevel:
+    """``normal``, ``warm``, ``critical``, or ``none`` for a sensor with no reading. A temperature
+    is warm from the heat map's warm band on, before any limit; anything past a limit is warm, and
+    so is a stalled fan."""
+    reading = row.reading if row is not None else None
+    if reading is None or reading.value is None:
+        return "none"
+    if reading.status is Status.CRITICAL:
+        return "critical"
+    if reading.status is Status.WARNING:
+        return "warm"
+    if reading.kind is Kind.TEMPERATURE and reading.value >= WARM_CELSIUS:
+        return "warm"
+    return "normal"
+
+
+def number_icon(text: str, level: TrayLevel, light_panel: bool = False) -> QIcon:
+    """A tray icon showing a number, like Core Temp does, with a rule under it coloured by
+    ``level`` (see ``tray_level``). The digits get a faint outline in the opposite colour, so
+    they still read if the guess at the panel's colour (``panel_is_light``) is wrong."""
+    size = 64
+    pixmap = QPixmap(size, size)
     pixmap.fill(Qt.GlobalColor.transparent)
     painter = QPainter(pixmap)
     painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-    background = {Status.OK: "#2563eb", Status.WARNING: "#d97706", Status.CRITICAL: "#dc2626"}[status]
-    painter.setBrush(QColor(background))
-    painter.setPen(Qt.PenStyle.NoPen)
-    painter.drawRoundedRect(0, 0, 64, 64, 14, 14)
+    rule = size // 12
+    inset = size // 8
+    painter.fillRect(inset, size - rule, size - 2 * inset, rule, QColor(TRAY_RULES[level]))
     font = QFontDatabase.systemFont(QFontDatabase.SystemFont.GeneralFont)  # not the app's bundled fonts
     font.setBold(True)
-    font.setPixelSize({1: 40, 2: 40, 3: 30, 4: 23}.get(len(text), 19))
+    font.setPixelSize({1: 44, 2: 44, 3: 32, 4: 24}.get(len(text), 19))
     painter.setFont(font)
-    painter.setPen(QColor("white"))
-    painter.drawText(pixmap.rect(), Qt.AlignmentFlag.AlignCenter, text)
+    if level == "critical":
+        color = TRAY_CRITICAL_TEXT
+    elif level == "none":
+        color = TRAY_SILENT_TEXT[light_panel]
+    else:
+        color = TRAY_TEXT[light_panel]
+    path = QPainterPath()
+    path.addText(0, 0, font, text)
+    halo_width = 4
+    room = size - halo_width - 2  # the outline reaches half its width past the digits, plus 1 px clear
+    if path.boundingRect().width() > room:  # a wide font's three digits
+        scale = room / path.boundingRect().width()
+        path = QTransform.fromScale(scale, scale).map(path)
+    area = QRectF(0, 0, size, size - rule - 2)
+    path.translate(area.center() - path.boundingRect().center())
+    halo = QColor(TRAY_TEXT[not light_panel])
+    halo.setAlpha(150)
+    painter.strokePath(
+        path, QPen(halo, halo_width, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin)
+    )
+    painter.fillPath(path, QColor(color))
     painter.end()
     return QIcon(pixmap)
-
-
-def temperature_icon(celsius: float | None, status: Status, fahrenheit: bool) -> QIcon:
-    return number_icon(format_short(Kind.TEMPERATURE, celsius, fahrenheit), status)
 
 
 def gather_cards(rows: list[Row]) -> list[Row]:
@@ -261,6 +311,12 @@ class MainWindow(QMainWindow):
         self.focus_key: str | None = None  # the sensor in the focus view, while it's open
         self.pinned: list[str] = self._load_list("pinned")
         self.names: dict[str, str] = self._load_names()
+        # Your arrangement of the overview's panels, and whether it's being edited.
+        self.panel_layout = Layout.load(settings.value("layout"))
+        self.editing = False
+        self._panels: list[str] = []  # every panel, gauges included, in the order shown
+        self._deck_key: tuple[tuple[str, bool], ...] | None = None
+        self._hidden_shown: tuple[str, ...] | None = None
 
         self.rows: dict[str, Row] = {}
         self.ordered: list[Row] = []
@@ -286,7 +342,7 @@ class MainWindow(QMainWindow):
         self._sampling = False
         self._stopped = False
         self.worker_stuck = False
-        self._tray_states: dict[str, tuple[str, Status, str]] = {}
+        self._tray_states: dict[str, tuple[str, TrayLevel, str]] = {}
         self._build_ui()
         self.apply_theme(self.theme)
         geometry = settings.value("geometry")
@@ -388,6 +444,11 @@ class MainWindow(QMainWindow):
         self.settings_button.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
         menu = QMenu(self.settings_button)
         self._add_display_options(menu)
+        self.edit_layout_action = QAction("Edit layout…", self)
+        self.edit_layout_action.setToolTip("Move, resize or hide the overview's panels")
+        self.edit_layout_action.triggered.connect(lambda: self.set_editing(True))
+        menu.addAction(self.edit_layout_action)  # the window's own: not in the tray's menu
+        menu.addSeparator()
         self._add_options(menu)
         self.addAction(self.quit_action)  # its shortcut works anywhere in the window
         # Ctrl+R is a window shortcut rather than the action's, so the tray menu, where it can't
@@ -410,6 +471,33 @@ class MainWindow(QMainWindow):
         self.notes.setVisible(False)
         layout.addWidget(self.notes)
 
+        # Over the overview while its layout is being edited.
+        self.layout_banner = QFrame()
+        self.layout_banner.setObjectName("layoutBanner")
+        banner = QHBoxLayout(self.layout_banner)
+        banner.setContentsMargins(16, 10, 12, 10)
+        banner.setSpacing(14)
+        words = QVBoxLayout()
+        words.setSpacing(2)
+        heading = QLabel("EDITING LAYOUT")
+        heading.setObjectName("bannerTitle")
+        words.addWidget(heading)
+        hint = QLabel("Drag a panel by its handle, or use its arrows. Choose half or full width, or hide it.")
+        hint.setWordWrap(True)
+        words.addWidget(hint)
+        banner.addLayout(words, 1)
+        self.reset_layout_button = QPushButton("Reset layout")
+        self.reset_layout_button.setToolTip("Every panel back in its usual place and width, none hidden")
+        self.reset_layout_button.clicked.connect(self.reset_layout)
+        banner.addWidget(self.reset_layout_button)
+        self.done_button = QPushButton("Done")
+        self.done_button.setObjectName("primary")
+        self.done_button.setToolTip("Stop editing the layout (Esc)")
+        self.done_button.clicked.connect(lambda: self.set_editing(False))
+        banner.addWidget(self.done_button)
+        self.layout_banner.setVisible(False)
+        layout.addWidget(self.layout_banner)
+
         self.list_area = QScrollArea()
         self.list_area.setObjectName("listArea")
         self.list_area.setWidgetResizable(True)
@@ -423,9 +511,23 @@ class MainWindow(QMainWindow):
         self.gauges = GaugeStrip()
         self.gauges.selected.connect(self._pick)
         self.gauges.opened.connect(self.open_focus)
-        page.addWidget(self.gauges)
+        self.gauge_panel = GaugePanel(self.gauges)  # one of the deck's panels, first by default
         self.deck = CardDeck()
         page.addWidget(self.deck)
+        # While editing: the panels you've hidden, each with a button to bring it back.
+        self.hidden_box = CardFrame()
+        hidden = QVBoxLayout(self.hidden_box)
+        hidden.setContentsMargins(14, 10, 14, 12)
+        hidden_title = QLabel("HIDDEN PANELS")
+        hidden_title.setObjectName("statLabel")
+        hidden.addWidget(hidden_title)
+        self.hidden_none = QLabel("None. Hide a panel with its eye button and it waits here.")
+        self.hidden_none.setObjectName("muted")
+        hidden.addWidget(self.hidden_none)
+        self.hidden_buttons = FlowRow()  # wraps, so many hidden panels never widen the page
+        hidden.addLayout(self.hidden_buttons)
+        self.hidden_box.setVisible(False)
+        page.addWidget(self.hidden_box)
         page.addStretch(1)
         self.list_area.setWidget(container)
 
@@ -611,6 +713,7 @@ class MainWindow(QMainWindow):
         self.settings.setValue("show_min_max", show)
         for section in self.sections.values():
             section.grid.set_show_min_max(show)
+        self.redraw()  # a longer or shorter grey line: the cards may want new widths
 
     def set_fahrenheit(self, fahrenheit: bool) -> None:
         self.fahrenheit = fahrenheit
@@ -635,6 +738,10 @@ class MainWindow(QMainWindow):
             themes.apply(app, theme)
         self.settings_button.setIcon(settings_icon(theme.muted))
         self.detail.focus_button.setIcon(expand_icon(theme.muted))
+        bars = [self.gauge_panel.layout_bar, *(section.layout_bar for section in self.sections.values())]
+        for bar in bars:
+            if bar is not None:
+                bar.restyle()
         self.focus.rename_button.setIcon(pencil_icon(theme.muted))
         for step, button in self.focus.step_buttons.items():
             button.setIcon(chevron_icon(theme.muted, up=step < 0))
@@ -838,6 +945,8 @@ class MainWindow(QMainWindow):
         # and steps aside while filtering.
         self.gauges.set_wanted(not filtering)
         self.gauges.set_specs(gauge_specs(self.plain_ordered, self.fahrenheit))
+        hidden = self.panel_layout.hidden
+        self.gauge_panel.setVisible(GAUGES not in hidden and not filtering and bool(self.gauges.gauges))
         labels = {key: row.reading.label for key, row in self.rows.items()}
         for device, rows in groups:
             section = self.sections[device]
@@ -850,17 +959,25 @@ class MainWindow(QMainWindow):
                 self.gap,
             )
             section.set_view_data(data, filtering)
-            section.setVisible(bool(rows))
+            section.setVisible(bool(rows) and device not in hidden)
             section.set_rows(rows, now, self.fahrenheit, self.gap)
             # Beside another card, it needs room for its compact view, or for its list when shown.
             need = themes.px(CardDeck.MIN_HALF)
             if section.table_shown():
                 need = max(need, section.grid.cell_min_width() + 28)  # 28: the card's side margins
             self.deck.set_need(section, need)
+        self._arrange()
         self.deck.reflow()  # cards with no match while filtering leave no hole
-        if self.selected_key not in {row.reading.key for row in self.ordered}:  # gone, or now hidden
-            best = headline(self.plain_ordered)
-            self.selected_key = best.reading.key if best else next(iter(self.rows), None)
+        shown = {row.reading.key for row in self.ordered}
+        if self.panel_layout.hidden:  # a sensor on a card you've hidden can't stay selected either
+            hidden_cards = [rows for device, rows in group_rows(self.ordered) if device in self.panel_layout.hidden]
+            shown -= {row.reading.key for rows in hidden_cards for row in rows}
+            # Unless a gauge shows it: you've kept the gauges (a filter hides them only for now).
+            if GAUGES not in self.panel_layout.hidden:
+                shown |= {gauge.spec.key for gauge in self.gauges.gauges if gauge.spec is not None}
+        if self.selected_key not in shown:  # gone, or now hidden
+            best = headline([row for row in self.plain_ordered if row.reading.key in shown])
+            self.selected_key = best.reading.key if best else next((key for key in self.rows if key in shown), None)
         for section in self.sections.values():
             section.set_selected(self.selected_key)
         self._show_detail()
@@ -870,11 +987,18 @@ class MainWindow(QMainWindow):
         """Create a card per device, reusing existing cards so their state survives."""
         for device in list(self.sections):
             if device not in devices:
-                self.sections.pop(device).deleteLater()
+                gone = self.sections.pop(device)
+                if gone.layout_bar is not None:
+                    gone.layout_bar.cancel_drag()  # its device went away in the middle of a drag
+                self.deck.mark_drop(None)
+                gone.deleteLater()
         for device in devices:
             section = self.sections.get(device)
             if section is None:
-                section = CategorySection(device, view=view_for(device), show_table=device in self.expanded)
+                # Parented at once: a card shown before it has a parent would open as a window.
+                section = CategorySection(
+                    device, parent=self.deck, view=view_for(device), show_table=device in self.expanded
+                )
                 section.table_toggled.connect(self._remember_table)
                 section.grid.selected.connect(self._pick)
                 section.grid.opened.connect(self.open_focus)
@@ -884,8 +1008,11 @@ class MainWindow(QMainWindow):
                 section.grid.context_requested.connect(self._show_sensor_menu)
                 section.grid.set_show_min_max(self.show_min_max)
                 self.sections[device] = section
-        self.deck.set_cards([(self.sections[device], is_wide(device)) for device in devices])
+                if self.editing:
+                    self._bar(device)
+                    section.set_editing(True)
         self._devices = devices
+        self._deck_key = None  # cards came or went: lay the deck out again
 
     def _apply_filter(self) -> None:
         self.redraw()
@@ -905,12 +1032,158 @@ class MainWindow(QMainWindow):
         self.detail.show_row(row, now, self.fahrenheit, self.gap, self.monitor.to_wall, pinned, can_pin)
         self._show_focus()
 
+    # ----- edit layout ----------------------------------------------------------------
+
+    def _panel_widget(self, panel: str) -> GaugePanel | CategorySection:
+        return self.gauge_panel if panel == GAUGES else self.sections[panel]
+
+    def _bar(self, panel: str) -> LayoutBar:
+        """``panel``'s edit bar, made and wired up the first time it's wanted."""
+        widget = self._panel_widget(panel)
+        made = widget.layout_bar is None
+        bar = widget.edit_bar()
+        if made:
+            self._connect_bar(panel, bar)
+        return bar
+
+    def _connect_bar(self, panel: str, bar: LayoutBar) -> None:
+        bar.step.connect(lambda step: self.move_panel(panel, step))
+        bar.width_chosen.connect(lambda wide: self.set_panel_wide(panel, wide))
+        bar.hide_requested.connect(lambda: self.set_panel_hidden(panel, True))
+        bar.grip.moved.connect(
+            lambda point: self.deck.mark_drop(self._drop_target(panel, point), self.panel_layout.wide(panel))
+        )
+        bar.grip.ended.connect(lambda point: self._drop_panel(panel, point))
+        bar.grip.cancelled.connect(lambda: self.deck.mark_drop(None))
+
+    def _arrange(self) -> None:
+        """Lay the deck out in your order and widths, and bring the edit bars up to date."""
+        self._panels = self.panel_layout.arrange([GAUGES, *self._devices])
+        key = tuple((panel, self.panel_layout.wide(panel)) for panel in self._panels)
+        for panel, wide in key:
+            if panel != GAUGES:  # a wide card lists its sensors in two columns, a half-width one in one
+                self.sections[panel].grid.set_columns(2 if wide else 1)
+        if key != self._deck_key:
+            self._deck_key = key
+            self.deck.set_cards([(self._panel_widget(panel), wide) for panel, wide in key])
+        if not self.editing:
+            return
+        shown = self._shown_panels()
+        for panel in shown:
+            self._bar(panel).set_state(panel == shown[0], panel == shown[-1], self.panel_layout.wide(panel))
+        self._sync_hidden_box()
+
+    def _shown_panels(self) -> list[str]:
+        return [panel for panel in self._panels if not self._panel_widget(panel).isHidden()]
+
+    def _sync_hidden_box(self) -> None:
+        # The hidden panels on screen, then any whose device isn't here now (unplugged, or renamed
+        # by a driver update), so a hidden panel can always be let go of.
+        here = [panel for panel in self._panels if panel in self.panel_layout.hidden]
+        away = sorted(self.panel_layout.hidden - set(self._panels))
+        hidden = (*here, *away)
+        if hidden == self._hidden_shown:
+            return
+        self._hidden_shown = hidden
+        while self.hidden_buttons.count():
+            item = self.hidden_buttons.takeAt(0)
+            widget = item.widget() if item is not None else None
+            if widget is not None:
+                widget.deleteLater()
+        for panel in hidden:
+            button = QPushButton(f"Show {panel}" if panel in here else f"Show {panel} (not here now)")
+            button.setToolTip(f"Show {panel} again" if panel in here else "It shows again when its device is back")
+            button.clicked.connect(lambda _=False, panel=panel: self.set_panel_hidden(panel, False))
+            self.hidden_buttons.addWidget(button)
+        self.hidden_none.setVisible(not hidden)
+
+    def set_editing(self, editing: bool) -> None:
+        """Edit-layout mode: every panel shows how to move, resize or hide it."""
+        if editing == self.editing:
+            return
+        self.editing = editing
+        if editing:
+            self.close_focus()
+            self.filter.clear()  # every panel in view while you arrange them
+        self.filter.setEnabled(not editing)
+        self.layout_banner.setVisible(editing)
+        self.hidden_box.setVisible(editing)
+        for panel in self._panels:
+            if editing:
+                self._bar(panel)
+            self._panel_widget(panel).set_editing(editing)
+        if not editing:  # Esc in the middle of a drag: it lands nowhere
+            for panel in self._panels:
+                bar = self._panel_widget(panel).layout_bar
+                if bar is not None:
+                    bar.cancel_drag()
+            self.deck.mark_drop(None)
+        self._sync_escape()
+        self.redraw()
+
+    def _change_layout(self) -> None:
+        self.settings.setValue("layout", self.panel_layout.dump())
+        self.redraw()
+
+    def move_panel(self, panel: str, step: int) -> None:
+        self.panel_layout.move(panel, step, self._panels, self._shown_panels())
+        self._change_layout()
+        QTimer.singleShot(0, self, lambda: self._follow(panel))  # once the deck has its new order
+
+    def _follow(self, panel: str) -> None:
+        """Keep a panel moved with its arrows in view, so the arrows can take it the whole way."""
+        # Its bar, not the whole panel: one taller than the view would be centred, its arrows
+        # scrolled out of sight above.
+        if self.editing and panel in self._panels:
+            self.list_area.ensureWidgetVisible(self._bar(panel), 0, 16)
+
+    def set_panel_wide(self, panel: str, wide: bool) -> None:
+        self.panel_layout.widths[panel] = wide
+        self._change_layout()
+
+    def set_panel_hidden(self, panel: str, hidden: bool) -> None:
+        if hidden:
+            self.panel_layout.hidden.add(panel)
+        else:
+            self.panel_layout.hidden.discard(panel)
+        self._change_layout()
+
+    def reset_layout(self) -> None:
+        self.panel_layout = Layout()
+        self._change_layout()
+
+    def _drop_target(self, panel: str, point: QPoint) -> tuple[QWidget, bool] | None:
+        """Where a panel dragged to ``point`` (on screen) would land; None over itself, outside
+        the cards in view (the drawer, the banner, past the window), or once editing has ended."""
+        if not self.editing or panel not in self._panels:
+            return None
+        viewport = self.list_area.viewport()
+        if not viewport.rect().contains(viewport.mapFromGlobal(point)):
+            return None
+        target = self.deck.drop_at(self.deck.mapFromGlobal(point), self.panel_layout.wide(panel))
+        return None if target is None or target[0] is self._panel_widget(panel) else target
+
+    def _drop_panel(self, panel: str, point: QPoint) -> None:
+        target = self._drop_target(panel, point)
+        self.deck.mark_drop(None)
+        if target is None:
+            return
+        widget, before = target
+        shown = self._shown_panels()
+        index = next(i for i, p in enumerate(shown) if self._panel_widget(p) is widget) + (0 if before else 1)
+        following = next((p for p in shown[index:] if p != panel), None)
+        # Hidden panels keep their place in the order: put it before the next shown one.
+        self.panel_layout.drop(panel, following, self._panels)
+        self._change_layout()
+
     # ----- focus view -----------------------------------------------------------------
 
     def open_focus(self, key: str) -> None:
         """Show sensor ``key`` across the whole window (it's selected in the overview too)."""
         if key not in self.rows:
             return
+        if self.editing:  # a double-click on a sensor while editing: done editing, then focus
+            self.set_editing(False)
         self.focus_key = key
         self._drawer_timer.stop()  # a double-click: the click it started with leaves the drawer be
         self._select(key)
@@ -969,10 +1242,12 @@ class MainWindow(QMainWindow):
             self.settings.setValue("drawer_height", self._drawer_height)
 
     def _sync_escape(self) -> None:
-        self.close_focus_shortcut.setEnabled(self.focus_key is not None or self.detail.expanded)
+        self.close_focus_shortcut.setEnabled(self.editing or self.focus_key is not None or self.detail.expanded)
 
     def _escape(self) -> None:
-        if self.focus_key is not None:
+        if self.editing:
+            self.set_editing(False)
+        elif self.focus_key is not None:
             self.close_focus()
         elif self.detail.expanded:
             self._set_drawer(False)
@@ -1003,9 +1278,19 @@ class MainWindow(QMainWindow):
             labels = {key: r.reading.label for key, r in self.rows.items()}
             plain = [r for r in self.plain_ordered if (r.reading.origin or r.reading.device) == device]
             cores = ViewData(plain, self.plain_ordered, labels, self.fahrenheit, self._now(), self.gap)
+        # Under its original name, as the rows it's matched with are: a graphics card's fan finds
+        # its control by name.
+        plain_row = next((r for r in self.plain_ordered if r.reading.key == row.reading.key), row)
+        # Per-core sensors go in the core strip, unless there's too few cores for one.
+        cores_shown = cores is not None and sum(len(group) for _, group in core_groups(cores.rows)) >= MIN_CORES
+        neighbours, total = related_rows(plain_row, self.plain_ordered, cores_shown=cores_shown)
+        names = {key: r.reading.label for key, r in self.rows.items()}
+        related = ViewData(neighbours, self.plain_ordered, names, self.fahrenheit, self._now(), self.gap)
         self.focus.show_row(
             row,
             cores,
+            related,
+            total,
             self._now(),
             self.fahrenheit,
             self.gap,
@@ -1020,7 +1305,8 @@ class MainWindow(QMainWindow):
     def _step_order(self) -> list[Row]:
         """Every sensor in the overview's order: card by card, each card's in its list's order
         (only what the filter matches, while there's one)."""
-        return [row for device in self._devices for _, rows in self.sections[device].grid.blocks() for row in rows]
+        cards = [p for p in self._panels if p in self.sections and p not in self.panel_layout.hidden]
+        return [row for device in cards for _, rows in self.sections[device].grid.blocks() for row in rows]
 
     def _neighbours(self) -> tuple[Row | None, Row | None]:
         """The focus view's previous and next sensor; the last one steps round to the first. From a
@@ -1073,13 +1359,13 @@ class MainWindow(QMainWindow):
             lines.append(line)
         return lines
 
-    def _tray_content(self, key: str) -> tuple[str, Status, str]:
-        """(number on the icon, status, tooltip) for one tray icon."""
+    def _tray_content(self, key: str) -> tuple[str, TrayLevel, str]:
+        """(number on the icon, its level for ``tray_level``, tooltip) for one tray icon."""
         if key == APP_TRAY:  # the logo; only its tooltip changes
-            return "", Status.OK, "\n".join(["corewatch", *self._summary()])
+            return "", "normal", "\n".join(["corewatch", *self._summary()])
         row = self.rows.get(key)
         if row is None:  # the sensor went away (driver unloaded, GPU asleep)
-            return "?", Status.OK, "corewatch\nThis pinned sensor isn't reporting right now"
+            return "?", "none", "corewatch\nThis pinned sensor isn't reporting right now"
         reading, stats = row.reading, row.stats
 
         def shown(value: float | None) -> str:
@@ -1095,7 +1381,7 @@ class MainWindow(QMainWindow):
                 f"average: {shown(stats.average)}",
             ]
         )
-        return format_short(reading.kind, reading.value, self.fahrenheit), reading.status, tooltip
+        return format_short(reading.kind, reading.value, self.fahrenheit), tray_level(row), tooltip
 
     def _update_tray(self) -> None:
         """corewatch's own icon, then one icon per pinned sensor."""
@@ -1118,20 +1404,20 @@ class MainWindow(QMainWindow):
                 tray.activated.connect(self._on_tray_activated)
                 if key == APP_TRAY:
                     tray.setIcon(tray_icon(self.light_panel))
-            text, status, tooltip = self._tray_content(key)
+            text, level, tooltip = self._tray_content(key)
             unpin = self._tray_menus[key].property("unpin")
             if isinstance(unpin, QAction):
                 row = self.rows.get(key)
                 unpin.setText(f"Unpin {row.reading.label}" if row else "Unpin this sensor")
             # Each update is a D-Bus round trip to the tray host, so only send real changes.
-            if self._tray_states.get(key) != (text, status, tooltip):
-                self._tray_states[key] = (text, status, tooltip)
+            if self._tray_states.get(key) != (text, level, tooltip):
+                self._tray_states[key] = (text, level, tooltip)
                 lines = tooltip.splitlines()
                 for index, action in enumerate(self._tray_info.get(key, [])):
                     action.setText(lines[index] if index < len(lines) else "")
                     action.setVisible(index < len(lines))
                 if key != APP_TRAY:
-                    tray.setIcon(number_icon(text, status))
+                    tray.setIcon(number_icon(text, level, self.light_panel))
                 tray.setToolTip(tooltip)
             if not tray.isVisible():
                 tray.show()

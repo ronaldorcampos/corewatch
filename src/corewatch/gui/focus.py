@@ -1,6 +1,6 @@
 """The focus view: one sensor across the whole window. A dial with its reading against its scale,
-a large chart with its limits, every statistic, and for a CPU sensor every core over the same
-minutes, on one scale."""
+a large chart with its limits, every statistic, for a CPU sensor every core over the same
+minutes, on one scale, and the other sensors on its device."""
 
 import math
 from collections.abc import Callable, Sequence
@@ -32,8 +32,8 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from corewatch.gui.cards import CompactView, Item, ViewData
-from corewatch.gui.overview import core_groups, heat_band, split_value
+from corewatch.gui.cards import CompactView, Item, ViewData, fan_duties
+from corewatch.gui.overview import CORE_LABEL, core_groups, heat_band, split_value
 from corewatch.gui.theme import BODY_FONT, DISPLAY_FONT, MONO_FONT, Theme, current_theme, font, paint_card, px
 from corewatch.gui.widgets import (
     DetailPanel,
@@ -54,11 +54,13 @@ from corewatch.model import (
     format_delta,
     format_duration,
     format_trend,
+    format_typical,
     format_value,
     to_fahrenheit,
 )
 
 HEAT_WORDS = ("cool", "mild", "warm", "hot")
+MIN_CORES = 2  # fewer core temperatures than this make no core strip
 
 
 def dial_full_scale(reading: Reading) -> float | None:
@@ -75,8 +77,51 @@ def dial_full_scale(reading: Reading) -> float | None:
     return None
 
 
+@dataclass(frozen=True)
+class RingScale:
+    """What the focus dial's ring runs over, and for a scale borrowed from the session rather than
+    the sensor's nature, what to call it under the ring."""
+
+    start: float
+    full: float
+    note: str = ""
+
+
+def ring_scale(row: Row, fahrenheit: bool, now: float, seconds: float) -> RingScale | None:
+    """The dial's scale for ``row``: its natural one (``dial_full_scale``); else a voltage's
+    reported limits, its typical range, or its range over the chart's last ``seconds`` (widened
+    as the chart widens it, so a step of the chip's resolution doesn't swing the ring end to end,
+    and a stray reading ages out); else the highest it has read (a fan against its fastest yet).
+    None while there's nothing to measure it against."""
+    reading, stats = row.reading, row.stats
+    full = dial_full_scale(reading)
+    if full is not None:
+        return RingScale(0.0, full)
+    kind = reading.kind
+
+    def span(low: float, high: float) -> str:
+        return f"{format_value(kind, low).rpartition(' ')[0]}–{format_value(kind, high)}"
+
+    if kind is Kind.VOLTAGE:
+        if reading.low is not None and reading.high is not None:
+            return RingScale(reading.low, reading.high, f"between its limits, {span(reading.low, reading.high)}")
+        if reading.typical_low is not None and reading.typical_high is not None:
+            return RingScale(reading.typical_low, reading.typical_high, format_typical(reading, fahrenheit))
+        values = [v for _, v in stats.window(seconds, now)]
+        if not values or max(values) - min(values) < 0.001:  # a steady rail: no range to show
+            return None
+        start, end = value_range(values, kind)
+        return RingScale(start, end, f"across its last {_window_text(seconds)}, {span(min(values), max(values))}")
+    if kind is Kind.TEMPERATURE or stats.maximum is None or stats.maximum <= 0:
+        return None
+    word = "fastest" if kind is Kind.FAN else "highest"
+    return RingScale(0.0, stats.maximum, f"against its {word} yet, {format_value(kind, stats.maximum)}")
+
+
 def reading_word(reading: Reading) -> str:
     """A word for where the reading stands: past a limit, or for a temperature, how warm."""
+    if reading.stall_duty is not None:
+        return "stalled"
     if reading.status is Status.CRITICAL:
         return "critical"
     if reading.status is Status.WARNING:
@@ -91,6 +136,8 @@ def headroom(reading: Reading, fahrenheit: bool) -> tuple[str, str]:
     value = reading.value
     if value is None:
         return "—", "no reading"
+    if reading.stall_duty is not None:  # a fan standing still while driven: no gap to speak of
+        return "stalled", f"its control asks {format_value(Kind.FAN_DUTY, reading.stall_duty)}"
 
     def gap(amount: float) -> str:
         return format_delta(reading.kind, amount, fahrenheit, signed=False)
@@ -109,6 +156,23 @@ def headroom(reading: Reading, fahrenheit: bool) -> tuple[str, str]:
             return gap(limit - value), f"to {name}"
     if low is not None:
         return gap(value - low), "above the low limit"
+    # None reported: what's typical for the sensor (corewatch.typical), said to be so.
+    typical_low, typical_high = reading.typical_low, reading.typical_high
+    if typical_high is not None and reading.kind in (Kind.LOAD, Kind.FAN_DUTY):
+        # Full is as far as it goes: a fan some drivers report at 105 % is just at full.
+        return gap(max(typical_high - value, 0.0)), "to full" if value < typical_high else "at full"
+    if typical_low is not None and value < typical_low:
+        return gap(typical_low - value), "below its typical low"
+    if typical_high is not None:
+        if value > typical_high:
+            return gap(value - typical_high), "past its typical high" if typical_low is not None else (
+                "past its typical limit"
+            )
+        if typical_low is None:
+            return gap(typical_high - value), "to its typical limit"
+        if typical_high - value <= value - typical_low:  # whichever end is nearer
+            return gap(typical_high - value), "to its typical high"
+        return gap(value - typical_low), "above its typical low"
     return "—", "no limit reported"
 
 
@@ -158,6 +222,8 @@ def focus_stats(row: Row, now: float, fahrenheit: bool, to_wall: Callable[[float
         else:
             never, past_note = f"never at {format_value(kind, reading.crit, f)}", "at critical"
         past = Stat("Past a limit", format_duration(seconds), never if seconds == 0 else past_note)
+    elif kind is Kind.FAN and stats.seconds_warning > 0:  # its stalls, though it has no limit, as the drawer
+        past = Stat("Past a limit", format_duration(stats.seconds_warning), "stalled")
     critical = Stat("At critical", "no limit", "none reported")
     if reading.crit is not None:
         shown = format_value(kind, reading.crit, f)
@@ -286,7 +352,8 @@ class StatGrid(QWidget):
 class Dial(QWidget):
     """The reading, large, inside a ring showing how far along its scale it is: the critical
     zone shaded at the end of the ring and a tick at the high limit. A sensor with no natural
-    scale gets its number without the ring."""
+    scale fills against one from the session (``ring_scale``), named under the ring; one with
+    nothing to measure against yet gets its number without the ring."""
 
     SWEEP = 270.0  # degrees of ring, open at the bottom
     SIZE = 260
@@ -295,21 +362,33 @@ class Dial(QWidget):
         super().__init__(parent)
         self.reading: Reading | None = None
         self.fahrenheit = False
+        self.scale: RingScale | None = None
         self.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
 
-    def set_reading(self, reading: Reading | None, fahrenheit: bool) -> None:
-        if (reading, fahrenheit) != (self.reading, self.fahrenheit):
-            self.reading, self.fahrenheit = reading, fahrenheit
+    def set_reading(self, reading: Reading | None, fahrenheit: bool, scale: RingScale | None = None) -> None:
+        """Show ``reading`` against ``scale``; left out, its natural scale, if it has one."""
+        if scale is None and reading is not None and (full := dial_full_scale(reading)) is not None:
+            scale = RingScale(0.0, full)
+        if (reading, fahrenheit, scale) != (self.reading, self.fahrenheit, self.scale):
+            lines = self._legend_lines()
+            self.reading, self.fahrenheit, self.scale = reading, fahrenheit, scale
+            if self._legend_lines() != lines:  # a borrowed scale's name takes two lines' room
+                self.updateGeometry()
             if reading is not None:
                 value, unit = split_value(reading.kind, reading.value, fahrenheit)
                 self.setAccessibleName(f"Now {value} {unit} {reading_word(reading)}".strip())
             self.update()
 
     def legend(self) -> list[tuple[str, str]]:
-        """(colour role, text) under the ring: the limits it marks."""
-        reading = self.reading
-        if reading is None or dial_full_scale(reading) is None:
+        """(colour role, text) under the ring: the limits it marks, or what it fills against."""
+        reading, scale = self.reading, self.scale
+        if reading is None or scale is None:
             return []
+        if scale.note:  # a borrowed scale, saying when the reading is off either end of it
+            value = reading.value
+            off = " · now below it" if value is not None and value < scale.start else ""
+            off = " · now above it" if value is not None and value > scale.full else off
+            return [("scale", scale.note + off)]
         shown = []
         if reading.high is not None:
             shown.append(("warning", f"high {format_value(reading.kind, reading.high, self.fahrenheit)}"))
@@ -317,8 +396,12 @@ class Dial(QWidget):
             shown.append(("critical", f"critical {format_value(reading.kind, reading.crit, self.fahrenheit)}"))
         return shown
 
+    def _legend_lines(self) -> int:
+        """Lines kept under the ring: two for a borrowed scale's name, which may need to wrap."""
+        return 2 if self.scale is not None and self.scale.note else 1
+
     def _legend_height(self) -> int:
-        return QFontMetrics(font(BODY_FONT, 13)).height() + px(10)
+        return QFontMetrics(font(BODY_FONT, 13)).height() * self._legend_lines() + px(10)
 
     def sizeHint(self) -> QSize:
         return QSize(px(self.SIZE), px(self.SIZE) + self._legend_height())
@@ -342,9 +425,13 @@ class Dial(QWidget):
         side = min(self.width(), self.height() - self._legend_height())
         ring = QRectF((self.width() - side) / 2, 0, side, side)
         center = ring.center()
-        full = dial_full_scale(reading)
+        scale = self.scale
         status_color = theme.value_color(reading.status)
-        if full is not None:
+        if scale is not None:
+
+            def share(value: float) -> float:
+                return (value - scale.start) / (scale.full - scale.start)
+
             dotted = QPen(QColor(theme.border), 1)
             dotted.setDashPattern([1, 4])
             painter.setPen(dotted)
@@ -359,19 +446,19 @@ class Dial(QWidget):
                 painter.drawArc(track, round(begin * 16), round((self._angle(end) - begin) * 16))
 
             arc(0.0, 1.0, QColor(theme.edge))
-            if reading.crit is not None:
+            if reading.crit is not None and not scale.note:
                 zone = QColor(theme.critical)
                 zone.setAlpha(90)
-                arc(reading.crit / full, 1.0, zone)
+                arc(share(reading.crit), 1.0, zone)
             if reading.value is not None:
                 ring_color = (
                     QColor(theme.heat[heat_band(reading.value)][0])
                     if reading.kind is Kind.TEMPERATURE and reading.status is Status.OK
                     else status_color
                 )
-                arc(0.0, reading.value / full, ring_color)
-            if reading.high is not None:
-                angle = math.radians(self._angle(reading.high / full))
+                arc(0.0, share(reading.value), ring_color)
+            if reading.high is not None and not scale.note:  # a borrowed scale marks no limits
+                angle = math.radians(self._angle(share(reading.high)))
                 direction = QPointF(math.cos(angle), -math.sin(angle))
                 painter.setPen(QPen(QColor(theme.warning), 2))
                 painter.drawLine(center + direction * (radius - thickness), center + direction * (radius + thickness))
@@ -399,28 +486,54 @@ class Dial(QWidget):
             painter.drawText(QRectF(0, y, self.width(), height), Qt.AlignmentFlag.AlignCenter, text)
             y += height
 
-        # The limits the ring marks.
+        # The limits the ring marks, or what it fills against.
         legend = self.legend()
-        if legend:
+        if len(legend) == 1 and legend[0][0] == "scale":  # words alone, wrapped to the dial's width
+            body = font(BODY_FONT, 13)
+            metrics = QFontMetrics(body)
+            painter.setFont(body)
+            painter.setPen(QColor(theme.muted))
+            top = ring.bottom() + px(4)
+            for line in wrap_lines(legend[0][1], metrics, self.width(), self._legend_lines()):
+                painter.drawText(QRectF(0, top, self.width(), metrics.height()), Qt.AlignmentFlag.AlignCenter, line)
+                top += metrics.height()
+        elif legend:
             body = font(BODY_FONT, 13)
             metrics = QFontMetrics(body)
             swatch, gap = px(14), px(18)
-            widths = [swatch + px(6) + metrics.horizontalAdvance(text) for _, text in legend]
+            # A limit gets a swatch of its mark on the ring; a borrowed scale's name is just words.
+            marks = [swatch + px(6) if role != "scale" else 0 for role, _ in legend]
+            widths = [mark + metrics.horizontalAdvance(text) for mark, (_, text) in zip(marks, legend, strict=True)]
             x = (self.width() - sum(widths) - gap * (len(widths) - 1)) / 2
             top = ring.bottom() + px(4)
             painter.setFont(body)
-            for (role, text), width in zip(legend, widths, strict=True):
-                color = QColor(theme.warning if role == "warning" else theme.critical)
-                mark = 2 if role == "warning" else 6
-                painter.fillRect(QRectF(x, top + metrics.height() / 2 - mark / 2, swatch, mark), color)
+            for (role, text), width, indent in zip(legend, widths, marks, strict=True):
+                if indent:
+                    color = QColor(theme.warning if role == "warning" else theme.critical)
+                    mark = 2 if role == "warning" else 6
+                    painter.fillRect(QRectF(x, top + metrics.height() / 2 - mark / 2, swatch, mark), color)
                 painter.setPen(QColor(theme.muted))
                 painter.drawText(
-                    QRectF(x + swatch + px(6), top, width, metrics.height()),
+                    QRectF(x + indent, top, width, metrics.height()),
                     Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
                     text,
                 )
                 x += width + gap
         painter.end()
+
+
+def wrap_lines(text: str, metrics: QFontMetrics, width: int, most: int) -> list[str]:
+    """``text`` broken at spaces into lines ``width`` px wide, at most ``most`` of them, the last
+    cut short with an ellipsis if there's more than they hold."""
+    lines: list[str] = []
+    for word in text.split(" "):
+        if lines and metrics.horizontalAdvance(f"{lines[-1]} {word}") <= width:
+            lines[-1] = f"{lines[-1]} {word}"
+        else:
+            lines.append(word)
+    if len(lines) > most:
+        lines = [*lines[: most - 1], " ".join(lines[most - 1 :])]
+    return [metrics.elidedText(line, Qt.TextElideMode.ElideRight, width) for line in lines]
 
 
 # ----- every core ---------------------------------------------------------------------------
@@ -433,6 +546,8 @@ class CoreItem(Item):
     band: int = 0
     points: tuple[tuple[float, float], ...] = field(default=(), compare=False)
     note: str = ""
+    scale: tuple[float, float] | None = field(default=None, compare=False)  # its own, else the strip's
+    status: Status = Status.OK
 
 
 class CoreStrip(CompactView):
@@ -447,6 +562,13 @@ class CoreStrip(CompactView):
         super().__init__(parent)
         self.window_seconds = 900.0
         self.scale: tuple[float, float] = (0.0, 100.0)
+        # Each tile's line, thinned to its width: kept until the next readings, so hovering and
+        # other repaints between samples don't thin every tile's window again.
+        self._lines: dict[str, tuple[int, list[list[tuple[float, float]]]]] = {}
+
+    def set_data(self, data: ViewData) -> None:
+        self._lines.clear()
+        super().set_data(data)
 
     def load(self, data: ViewData) -> list[Item]:
         clocks = {r.reading.label: r for r in data.rows if r.reading.kind is Kind.CLOCK}
@@ -504,8 +626,10 @@ class CoreStrip(CompactView):
 
     def paint_item(self, painter: QPainter, rect: QRectF, item: Item, theme: Theme) -> None:
         assert isinstance(item, CoreItem)
-        warm = item.band >= 2
+        warm = item.band >= 2 or item.status is not Status.OK
         edge, _, name_color = theme.heat[item.band]
+        if item.status is not Status.OK:  # past a limit: the limit's colour, whatever the heat
+            edge = name_color = theme.status(item.status).name()
         painter.setPen(QPen(QColor(edge if warm else theme.edge), 1))
         painter.setBrush(Qt.BrushStyle.NoBrush)
         painter.drawRect(rect.adjusted(0.5, 0.5, -0.5, -0.5))
@@ -523,7 +647,7 @@ class CoreStrip(CompactView):
         painter.drawText(top, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, name)
 
         chart = QRectF(inner.left(), top.bottom() + px(6), inner.width(), px(34))
-        low, high = self.scale
+        low, high = item.scale or self.scale
         start = self.data.now - self.window_seconds
 
         def to_xy(t: float, v: float) -> QPointF:
@@ -533,7 +657,12 @@ class CoreStrip(CompactView):
             )
 
         painter.setPen(QPen(QColor(edge), 1.5))
-        for segment in drawable_segments(item.points, start, self.window_seconds, int(chart.width()), self.data.gap):
+        width = int(chart.width())
+        cached = self._lines.get(item.key)
+        if cached is None or cached[0] != width:
+            cached = width, drawable_segments(item.points, start, self.window_seconds, width, self.data.gap)
+            self._lines[item.key] = cached
+        for segment in cached[1]:
             if len(segment) > 1:
                 path = QPainterPath(to_xy(*segment[0]))
                 for point in segment[1:]:
@@ -544,6 +673,77 @@ class CoreStrip(CompactView):
         note_box = QRectF(inner.left(), chart.bottom() + px(6), inner.width(), QFontMetrics(note_font).height())
         shown = QFontMetrics(note_font).elidedText(item.note, Qt.TextElideMode.ElideRight, int(inner.width()))
         painter.drawText(note_box, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, shown)
+
+
+# ----- the same device ----------------------------------------------------------------------
+
+
+def related_rows(
+    focused: Row, rows: Sequence[Row], limit: int = 12, cores_shown: bool = False
+) -> tuple[list[Row], int]:
+    """The other sensors on ``focused``'s device, at most ``limit``, and how many there are: its
+    fan or fan control first, then its own kind, then the rest in ``rows``' order. While the core
+    strip is shown (``cores_shown``), a CPU's per-core sensors are left to it."""
+    device = focused.reading.origin or focused.reading.device
+    others = [
+        row
+        for row in rows
+        if (row.reading.origin or row.reading.device) == device
+        and row.reading.key != focused.reading.key
+        and not (cores_shown and CORE_LABEL.match(row.reading.label.removesuffix(" clock").removesuffix(" load")))
+    ]
+    key = focused.reading.key
+    duties = fan_duties([*others, focused])  # a fan's control, by the fan's key
+    partner = (
+        duties[key].reading.key
+        if key in duties
+        else next((fan for fan, duty in duties.items() if duty.reading.key == key), None)
+    )
+
+    def rank(row: Row) -> int:
+        if row.reading.key == partner:
+            return 0
+        return 1 if row.reading.kind is focused.reading.kind else 2
+
+    ordered = sorted(others, key=rank)  # stable: the overview's order within each rank
+    return ordered[:limit], len(ordered)
+
+
+class RelatedStrip(CoreStrip):
+    """The focused sensor's neighbours on its device over the same minutes, each on its own scale,
+    with its peak. Click one to focus on it."""
+
+    ACCESSIBLE_NAME = "Same device"
+
+    def load(self, data: ViewData) -> list[Item]:
+        items: list[Item] = []
+        f = data.fahrenheit
+        for row in data.rows:
+            reading = row.reading
+            points = row.stats.window(self.window_seconds, data.now)
+            name = data.labels.get(reading.key, reading.label)
+            values = [v for _, v in points]
+            scale = value_range(values, reading.kind) if values else None
+            temperature = reading.kind is Kind.TEMPERATURE
+            items.append(
+                CoreItem(
+                    reading.key,
+                    f"{name}: {format_value(reading.kind, reading.value, f)}",
+                    name,
+                    _tile_value(reading.kind, reading.value, f),
+                    heat_band(reading.value) if temperature and reading.value is not None else 0,
+                    tuple(points),
+                    f"max {_tile_value(reading.kind, max(values), f)}" if values else "",
+                    scale,
+                    reading.status,
+                )
+            )
+        return items
+
+
+def _tile_value(kind: Kind, value: float | None, fahrenheit: bool) -> str:
+    """A value on a strip's tile: a temperature in whole degrees, as on the core strip."""
+    return _degrees(value, fahrenheit) if kind is Kind.TEMPERATURE else format_value(kind, value, fahrenheit)
 
 
 def _degrees(celsius: float | None, fahrenheit: bool) -> str:
@@ -729,6 +929,24 @@ class FocusView(QWidget):
         self.cores.selected.connect(self.selected)
         cores_box.addWidget(self.cores)
         page.addWidget(self.cores_panel)
+
+        self.related_panel = Panel()
+        related_box = QVBoxLayout(self.related_panel)
+        related_box.setContentsMargins(18, 16, 18, 18)
+        related_box.setSpacing(12)
+        related_head = QHBoxLayout()
+        related_title = QLabel("Same device")
+        related_title.setObjectName("sectionTitle")
+        related_head.addWidget(related_title)
+        self.related_note = QLabel("")
+        self.related_note.setObjectName("muted")
+        related_head.addWidget(self.related_note)
+        related_head.addStretch(1)
+        related_box.addLayout(related_head)
+        self.related = RelatedStrip()
+        self.related.selected.connect(self.selected)
+        related_box.addWidget(self.related)
+        page.addWidget(self.related_panel)
         page.addStretch(1)
         self.scroll_area.setWidget(body)
         outer.addWidget(self.scroll_area, 1)
@@ -766,6 +984,8 @@ class FocusView(QWidget):
         self,
         row: Row,
         cores: ViewData | None,
+        related: ViewData,
+        related_total: int,
         now: float,
         fahrenheit: bool,
         gap: float,
@@ -773,7 +993,9 @@ class FocusView(QWidget):
         pinned: bool,
         can_pin: bool,
     ) -> None:
-        """Show ``row``; ``cores`` is its CPU's sensors when it's a CPU sensor, else None."""
+        """Show ``row``; ``cores`` is its CPU's sensors when it's a CPU sensor, else None, and
+        ``related`` the other sensors on its device worth showing (``related_rows``), of
+        ``related_total``."""
         reading = row.reading
         self.key = reading.key
         self.device.setText((reading.origin or reading.device).upper())
@@ -789,7 +1011,7 @@ class FocusView(QWidget):
         self.pin_button.setText("Pinned to tray" if pinned else "Pin to tray")
         self.pin_button.blockSignals(False)
 
-        self.dial.set_reading(reading, fahrenheit)
+        self.dial.set_reading(reading, fahrenheit, ring_scale(row, fahrenheit, now, self.window_seconds))
         room, room_note = headroom(reading, fahrenheit)
         trend = format_trend(reading.kind, row.stats.trend_per_minute(now), fahrenheit)
         theme = current_theme()
@@ -807,8 +1029,14 @@ class FocusView(QWidget):
         self.cores.window_seconds = self.window_seconds
         if cores is not None:
             self.cores.set_data(cores)
-        shown = cores is not None and len(self.cores.items) >= 2
+        shown = cores is not None and len(self.cores.items) >= MIN_CORES
         self.cores_panel.setVisible(shown)
         if shown:
             self.cores_note.setText(f"same {_window_text(self.window_seconds)}, same scale")
             self.cores.set_selected(reading.key)
+
+        self.related.window_seconds = self.window_seconds
+        self.related.set_data(related)
+        self.related_panel.setVisible(bool(self.related.items))
+        count = f"{len(self.related.items)} of {related_total}, " if related_total > len(self.related.items) else ""
+        self.related_note.setText(f"{count}same {_window_text(self.window_seconds)}, each on its own scale")

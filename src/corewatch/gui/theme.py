@@ -21,7 +21,7 @@ GRID_STEP = 32  # px between the background grid's lines
 CORNER_MARK = 16  # px length of each arm of a card's corner marks
 
 # Text is sized in pixels for the design, then scaled up for desktops set to larger text than
-# the usual 11 pt at 96 dpi (never down, and at most 1.6x, which the list's 30 px rows still fit).
+# the usual 11 pt at 96 dpi (never down, and at most 1.6x).
 DESIGN_TEXT_PIXELS = 11.0 * 96 / 72
 MAX_TEXT_SCALE = 1.6
 _text_scale = 1.0
@@ -309,6 +309,16 @@ def stylesheet(t: Theme) -> str:
     }}
     QPushButton#back {{ padding: 10px 16px; }}
     QPushButton#iconButton {{ padding: 6px 8px; }}
+    QFrame#layoutBanner {{ background: {t.accent_soft}; border: 1px solid {t.accent}; }}
+    QLabel#bannerTitle {{
+        color: {t.accent}; font-family: {display}; font-size: {px(11)}px; font-weight: 600; letter-spacing: 2px;
+    }}
+    QPushButton#primary {{ background: {t.accent_soft}; color: {t.accent}; border-color: {t.accent}; }}
+    QPushButton#segment {{ padding: 6px 10px; min-width: 18px; }}
+    QLabel#moving {{
+        background: {t.accent}; color: {t.surface}; font-family: {mono}; font-size: {px(10)}px; padding: 1px 6px;
+    }}
+    QWidget#dropLine {{ background: {t.accent}; }}
     QPushButton#rename {{ background: transparent; border: 1px solid transparent; padding: 4px; }}
     QPushButton#rename:hover {{ border-color: {t.accent}; }}
     QMenu {{ background: {t.raised}; border: 1px solid {t.border}; padding: 6px 0; }}
