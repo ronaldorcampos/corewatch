@@ -164,9 +164,24 @@ not yet been tried on real AMD hardware. If you have a Ryzen or Radeon, the outp
 
 ### Ubuntu and Debian
 
-Download the `.deb` from the [latest release](https://github.com/ronaldorcampos/corewatch/releases/latest)
-(Ubuntu 24.04, Debian 13 or newer; `amd64` for PCs, `arm64` for ARM) and install it with apt,
-which also installs the system libraries it needs:
+On Ubuntu 24.04, Debian 13 or newer (PCs and ARM), add corewatch's apt repository and install it
+from there, so `apt upgrade` keeps it up to date:
+
+```bash
+curl -fsSL https://ronaldorcampos.github.io/corewatch/corewatch.gpg | sudo tee /usr/share/keyrings/corewatch.gpg > /dev/null
+```
+
+```bash
+echo "deb [signed-by=/usr/share/keyrings/corewatch.gpg] https://ronaldorcampos.github.io/corewatch stable main" | sudo tee /etc/apt/sources.list.d/corewatch.list
+```
+
+```bash
+sudo apt update && sudo apt install corewatch
+```
+
+Or, without the repository and its updates, download the `.deb` from the
+[latest release](https://github.com/ronaldorcampos/corewatch/releases/latest) (`amd64` for PCs,
+`arm64` for ARM) and install it with apt, which also installs the system libraries it needs:
 
 ```bash
 sudo apt install ./corewatch_*_$(dpkg --print-architecture).deb
@@ -186,7 +201,8 @@ uv tool uninstall corewatch; rm -f ~/.local/share/applications/corewatch.desktop
 `sudo apt remove corewatch` removes the package. What it doesn't know about stays: your settings
 in `~/.config/corewatch`, and the login entry if you turned on **Start when I log in** (turn it off
 before removing, or delete `~/.config/autostart/corewatch.desktop`), and the CPU power rule if you
-copied it into place (`sudo rm /etc/udev/rules.d/99-corewatch-rapl.rules`).
+copied it into place (`sudo rm /etc/udev/rules.d/99-corewatch-rapl.rules`). To drop the repository
+too: `sudo rm /etc/apt/sources.list.d/corewatch.list /usr/share/keyrings/corewatch.gpg`.
 
 To build the package yourself from a clone, run `packaging/deb/build.sh` (it needs uv,
 `dpkg-deb`, and `readelf` from binutils); it writes it to `dist/`.

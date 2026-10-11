@@ -93,3 +93,43 @@ jobs:
           else
             gh release create "$GITHUB_REF_NAME" dist/*.deb dist/*.rpm --title "$GITHUB_REF_NAME" --generate-notes
           fi
+
+  # The apt repository on GitHub Pages (https://ronaldorcampos.github.io/corewatch), holding this
+  # release's .debs and nothing older. Pre-releases (v0.2.0rc1: the only tags with letters) stay
+  # off it, so nobody's apt upgrade picks one up.
+  apt:
+    name: Apt repository
+    needs: release
+    if: ${{ !contains(github.ref_name, 'a') && !contains(github.ref_name, 'b') && !contains(github.ref_name, 'rc') }}
+    permissions:
+      pages: write  # to deploy the site
+      id-token: write  # which deploy-pages proves its identity with
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: packages-*
+          path: dist
+          merge-multiple: true
+
+      - name: Build and sign the repository
+        env:
+          APT_SIGNING_KEY: ${{ secrets.APT_SIGNING_KEY }}
+        run: |
+          sudo apt-get install -y --no-install-recommends apt-utils
+          printf '%s\n' "$APT_SIGNING_KEY" | gpg --batch --import
+          packaging/deb/apt-repo.sh dist site
+
+      - uses: actions/upload-pages-artifact@v5
+        with:
+          path: site
+
+      - id: deploy
+        uses: actions/deploy-pages@v5
