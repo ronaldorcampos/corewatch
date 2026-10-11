@@ -165,11 +165,11 @@ not yet been tried on real AMD hardware. If you have a Ryzen or Radeon, the outp
 ### Ubuntu and Debian
 
 Download the `.deb` from the [latest release](https://github.com/ronaldorcampos/corewatch/releases/latest)
-(64-bit PCs; Ubuntu 24.04, Debian 13 or newer) and install it with apt, which also installs the
-system libraries it needs:
+(Ubuntu 24.04, Debian 13 or newer; `amd64` for PCs, `arm64` for ARM) and install it with apt,
+which also installs the system libraries it needs:
 
 ```bash
-sudo apt install ./corewatch_*_amd64.deb
+sudo apt install ./corewatch_*_$(dpkg --print-architecture).deb
 ```
 
 That gives you the `corewatch` command, its launcher entry and icon. The package carries its own
@@ -190,6 +190,27 @@ copied it into place (`sudo rm /etc/udev/rules.d/99-corewatch-rapl.rules`).
 
 To build the package yourself from a clone, run `packaging/deb/build.sh` (it needs uv,
 `dpkg-deb`, and `readelf` from binutils); it writes it to `dist/`.
+
+### Fedora, RHEL and openSUSE
+
+Download the `.rpm` from the [latest release](https://github.com/ronaldorcampos/corewatch/releases/latest)
+(`x86_64` for PCs, `aarch64` for ARM) and install it with dnf or zypper, which also install the
+system libraries it needs:
+
+```bash
+sudo dnf install ./corewatch-*.$(uname -m).rpm
+```
+
+On openSUSE: `sudo zypper install --allow-unsigned-rpm ./corewatch-*.$(uname -m).rpm`. It works on
+Fedora 42, RHEL 9 and openSUSE Leap 15.6 or newer on PCs. On ARM, Qt needs a newer C library:
+Fedora 42, RHEL 10 or openSUSE Leap 16 or newer. On RHEL, some of the libraries come from the
+AppStream repository, which is on by default.
+
+It carries the same as the `.deb`, under `/opt/corewatch`, and the same about an earlier uv install
+applies. `sudo dnf remove corewatch` (or `zypper remove`) removes it, leaving behind what the
+`.deb` does. The CPU power
+rule is in `/usr/share/corewatch` here too. To build it yourself, run `packaging/rpm/build.sh` (it
+needs uv, `rpmbuild` and `readelf`).
 
 ### Anywhere else, with uv
 
@@ -294,7 +315,7 @@ curl -fsSL https://raw.githubusercontent.com/ronaldorcampos/corewatch/main/packa
 ```
 
 (From a clone, `sudo cp packaging/99-corewatch-rapl.rules /etc/udev/rules.d/` does the same. The
-`.deb` carries the rule without turning it on: `sudo cp /usr/share/corewatch/99-corewatch-rapl.rules
+packages carry the rule without turning it on: `sudo cp /usr/share/corewatch/99-corewatch-rapl.rules
 /etc/udev/rules.d/`.)
 
 ```bash
