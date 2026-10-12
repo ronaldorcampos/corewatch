@@ -340,28 +340,11 @@ sudo udevadm trigger --subsystem-match=powercap --action=add
 
 Restart corewatch afterwards; it checks for the counters when it starts.
 
-## Development
-
-```bash
-uv sync
-prek install
-uv run corewatch         # run from the checkout
-uv run pytest
-uv run ruff check . && uv run ruff format --check .
-uv run mypy
-```
-
-Sensor sources take their sysfs and procfs roots as constructor arguments, so the tests build fake
-trees in a temporary directory and never touch real hardware. The GUI tests run on Qt's offscreen
-platform.
-
 ## Contributing
 
-Pull requests are welcome. Each one runs the CI checks (ruff, formatting, mypy and the tests) and
-needs them green plus the maintainer's review before it can be merged; merges are squashed or
-rebased to keep `main`'s history linear. Running `prek install` once gives you the same checks
-before every commit. AMD and other hardware reports (`corewatch dump --json --all`) are
-especially useful as issues.
+Pull requests are welcome, and hardware reports (`corewatch dump --json --all`) especially, as
+issues. [CONTRIBUTING.md](CONTRIBUTING.md) covers setting up, the checks and how pull requests are
+merged; [SECURITY.md](SECURITY.md) covers reporting a vulnerability.
 
 Licensed under the [MIT License](LICENSE). The bundled fonts (Chakra Petch, JetBrains Mono and IBM Plex
 Sans, in `src/corewatch/assets/fonts`) are under the SIL Open Font License; their licences are beside them.
