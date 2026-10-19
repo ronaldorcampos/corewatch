@@ -14,7 +14,7 @@ class NvidiaSource:
     name = "nvidia"
 
     def __init__(self, nvml: ModuleType | None = None, nvapi: Any = "auto") -> None:
-        """``nvapi`` adds hotspot and VRAM temperatures: "auto" loads it if the driver
+        """``nvapi`` adds hotspot and VRAM temperatures and the core voltage: "auto" loads it if the driver
         provides it, None turns it off, anything else is used as-is (tests)."""
         self.nvml: Any = nvml
         self.nvapi: Any = None
@@ -47,7 +47,7 @@ class NvidiaSource:
                 from corewatch.sources.nvapi import NvApi
 
                 nvapi = NvApi()
-            except Exception:  # no NvAPI on this driver: just no hotspot / VRAM rows
+            except Exception:  # no NvAPI on this driver: just no hotspot / VRAM / voltage rows
                 return
         if nvapi is None:
             return
@@ -162,6 +162,7 @@ class NvidiaSource:
             _, top = self._call("nvmlDeviceGetMaxClockInfo", handle, clock)
             add(key, label, Kind.CLOCK, "nvmlDeviceGetClockInfo", clock, cap=float(top) if top else None)
 
+        readings.extend(self._gpu_voltage(index, device))
         supported, utilization = self._call("nvmlDeviceGetUtilizationRates", handle)
         if supported:
             gpu_load = float(utilization.gpu) if utilization is not None else None
@@ -212,6 +213,18 @@ class NvidiaSource:
                 # "temp/" keeps these apart from e.g. nvidia/0/memory (video memory used).
                 readings.append(Reading(f"nvidia/{index}/temp/{key}", device, label, Kind.TEMPERATURE, value))
         return readings
+
+    def _gpu_voltage(self, index: int, device: str) -> list[Reading]:
+        """The core voltage, from NvAPI: only for a GPU where it read sensibly at the start, and
+        blank when a read fails or comes back outside NvAPI's sensible range."""
+        gpu = self._nvapi_gpus.get(index)
+        if gpu is None or not gpu.has_voltage:
+            return []
+        try:
+            volts: float | None = self.nvapi.voltage(gpu)
+        except Exception:  # a passing failure: keep the row, show no value this time
+            volts = None
+        return [Reading(f"nvidia/{index}/voltage", device, "Core voltage", Kind.VOLTAGE, volts)]
 
     def close(self) -> None:
         if self.nvapi is not None:

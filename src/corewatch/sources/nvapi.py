@@ -1,4 +1,4 @@
-"""NVIDIA hotspot and VRAM temperatures through NvAPI, which NVML doesn't expose.
+"""NVIDIA hotspot and VRAM temperatures and the core voltage through NvAPI, which NVML doesn't expose.
 
 NvAPI ships with the driver as ``libnvidia-api.so.1``. Its only exported symbol is
 ``nvapi_QueryInterface``, which hands out functions by numeric ID. The IDs and struct
@@ -9,7 +9,7 @@ doesn't know, a channel that isn't there) simply means no reading.
 
 import contextlib
 import ctypes
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
 LIBRARY = "libnvidia-api.so.1"
@@ -20,11 +20,14 @@ ENUM_PHYSICAL_GPUS = 0xE5AC921F
 GPU_GET_BUS_ID = 0x1BE0B8E5
 THERM_CHANNEL_GET_INFO = 0x0BC8163D
 THERM_CHANNEL_GET_STATUS = 0x65FE3AAD
+GPU_GET_CORE_VOLTAGE = 0x465F9BCF
 
 MAX_GPUS = 64
 CHANNELS = 32
 HOTSPOT_TYPE = 1
 MEMORY_TYPE = 3
+# Undocumented, so a core voltage outside this is taken for a misread, not shown.
+VOLTS = (0.5, 1.5)
 
 
 class _Channel(ctypes.Structure):
@@ -64,6 +67,16 @@ class _Temperatures(ctypes.Structure):
     ]
 
 
+class _Voltage(ctypes.Structure):
+    _fields_ = [
+        ("version", ctypes.c_uint32),
+        ("flags", ctypes.c_uint32),
+        ("rsvd", ctypes.c_uint32 * 8),
+        ("value_uv", ctypes.c_uint32),  # microvolts
+        ("rsvd2", ctypes.c_uint32 * 8),
+    ]
+
+
 def _version(struct: type[ctypes.Structure], version: int) -> int:
     return ctypes.sizeof(struct) | (version << 16)
 
@@ -75,6 +88,7 @@ class Gpu:
     mask: int
     hotspot: int | None  # channel index
     memory: int | None
+    has_voltage: bool = False  # the core voltage read sensibly as NvAPI started
 
 
 class NvApi:
@@ -86,6 +100,11 @@ class NvApi:
         self._query.argtypes = [ctypes.c_uint32]
         self._check(self._function(INITIALIZE)())
         try:
+            try:
+                # A driver without the voltage call still gives the temperatures.
+                self._get_voltage = self._function(GPU_GET_CORE_VOLTAGE, ctypes.c_void_p, ctypes.POINTER(_Voltage))
+            except RuntimeError:
+                self._get_voltage = None
             self.gpus = self._discover()
             self._get_status = self._function(THERM_CHANNEL_GET_STATUS, ctypes.c_void_p, ctypes.POINTER(_Temperatures))
         except Exception:
@@ -128,7 +147,8 @@ class NvApi:
                 index = info.primary[kind]
                 return index if index < CHANNELS and info.mask & (1 << index) else None
 
-            gpus.append(Gpu(handle or 0, bus.value, info.mask, channel(HOTSPOT_TYPE), channel(MEMORY_TYPE)))
+            gpu = Gpu(handle or 0, bus.value, info.mask, channel(HOTSPOT_TYPE), channel(MEMORY_TYPE))
+            gpus.append(replace(gpu, has_voltage=self.voltage(gpu) is not None))
         return gpus
 
     def temperatures(self, gpu: Gpu) -> dict[str, float]:
@@ -145,6 +165,17 @@ class NvApi:
             if 0 < celsius < 255:  # outside this, the channel isn't really reporting
                 found[name] = celsius
         return found
+
+    def voltage(self, gpu: Gpu) -> float | None:
+        """The core voltage in volts, or None if the call fails or the value is outside VOLTS."""
+        if self._get_voltage is None:
+            return None
+        status = _Voltage()
+        status.version = _version(_Voltage, 1)
+        if self._get_voltage(gpu.handle, ctypes.byref(status)) != 0:
+            return None
+        volts = status.value_uv / 1_000_000
+        return volts if VOLTS[0] <= volts <= VOLTS[1] else None
 
     def close(self) -> None:
         with contextlib.suppress(RuntimeError):

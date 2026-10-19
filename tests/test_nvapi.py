@@ -14,6 +14,8 @@ def test_struct_layouts_match_nvidias() -> None:
     assert nv._ChannelInfo.primary.offset == 2728
     assert ctypes.sizeof(nv._Temperatures) == 168
     assert nv._version(nv._ChannelInfo, 2) == 0x20AB0 and nv._version(nv._Temperatures, 2) == 0x200A8
+    assert ctypes.sizeof(nv._Voltage) == 76 and nv._Voltage.value_uv.offset == 40
+    assert nv._version(nv._Voltage, 1) == 0x1004C
 
 
 class FakeLibrary:
@@ -23,6 +25,8 @@ class FakeLibrary:
         primary: dict[int, int] | None = None,
         temps: dict[int, float] | None = None,
         enum_status: int = 0,
+        microvolts: list[int] | None = None,  # each read's, the last repeating; None: no voltage call
+        voltage_status: int = 0,
     ) -> None:
         self.calls: list[str] = []
         primary = {0: 0, 1: 1, 3: 7} if primary is None else primary
@@ -62,6 +66,13 @@ class FakeLibrary:
                 data.contents.temps[channel] = int(celsius * 256)
             return 0
 
+        def voltage(handle, data):  # type: ignore[no-untyped-def]
+            if data.contents.version != nv._version(nv._Voltage, 1):
+                return -9
+            assert microvolts is not None
+            data.contents.value_uv = microvolts.pop(0) if len(microvolts) > 1 else microvolts[0]
+            return voltage_status
+
         int_fn = ctypes.CFUNCTYPE(ctypes.c_int)
         self._functions = {
             nv.INITIALIZE: int_fn(initialize),
@@ -75,6 +86,10 @@ class FakeLibrary:
                 ctypes.c_int, ctypes.c_void_p, ctypes.POINTER(nv._Temperatures)
             )(status),
         }
+        if microvolts is not None:
+            self._functions[nv.GPU_GET_CORE_VOLTAGE] = ctypes.CFUNCTYPE(
+                ctypes.c_int, ctypes.c_void_p, ctypes.POINTER(nv._Voltage)
+            )(voltage)
 
         def query(function_id: int) -> int | None:
             function = self._functions.get(function_id)
@@ -100,6 +115,25 @@ def test_missing_channels_and_dead_values_are_left_out() -> None:
     assert unmasked.gpus[0].memory is None
     dead = nv.NvApi(library=FakeLibrary(temps={1: 0.0, 7: 255.0}))  # outside 0 < °C < 255
     assert dead.temperatures(dead.gpus[0]) == {}
+
+
+def test_reads_the_core_voltage_once_it_read_sensibly_at_the_start() -> None:
+    api = nv.NvApi(library=FakeLibrary(microvolts=[890_000, 950_000, 2_000_000, 400_000]))
+    [gpu] = api.gpus
+    assert gpu.has_voltage  # the first read, at discovery
+    assert api.voltage(gpu) == 0.95
+    assert api.voltage(gpu) is None  # 2 V: a misread
+    assert api.voltage(gpu) is None  # 0.4 V too
+
+
+def test_no_voltage_call_or_a_bad_first_read_means_no_voltage() -> None:
+    no_call = nv.NvApi(library=FakeLibrary())  # the temperatures still come
+    assert not no_call.gpus[0].has_voltage and no_call.voltage(no_call.gpus[0]) is None
+    assert no_call.temperatures(no_call.gpus[0]) == {"hotspot": 46.5, "memory": 50.0}
+    failing = nv.NvApi(library=FakeLibrary(microvolts=[890_000], voltage_status=-6))
+    assert not failing.gpus[0].has_voltage and failing.voltage(failing.gpus[0]) is None
+    nonsense = nv.NvApi(library=FakeLibrary(microvolts=[0, 900_000]))
+    assert not nonsense.gpus[0].has_voltage
 
 
 def test_failed_discovery_unloads_before_giving_up() -> None:

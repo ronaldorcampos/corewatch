@@ -137,16 +137,27 @@ def test_transient_fan_count_error_keeps_the_fan_rows() -> None:
 
 class FakeNvApi:
     def __init__(
-        self, temps: dict[str, float] | Exception, bus: int = 1, hotspot: int | None = 1, memory: int | None = 7
+        self,
+        temps: dict[str, float] | Exception,
+        bus: int = 1,
+        hotspot: int | None = 1,
+        memory: int | None = 7,
+        volts: float | Exception | None = 0.925,
     ):
-        self.gpus = [SimpleNamespace(bus=bus, hotspot=hotspot, memory=memory)]
+        self.gpus = [SimpleNamespace(bus=bus, hotspot=hotspot, memory=memory, has_voltage=volts is not None)]
         self.temps = temps
+        self.volts = volts
         self.closed = False
 
     def temperatures(self, gpu):  # type: ignore[no-untyped-def]
         if isinstance(self.temps, Exception):
             raise self.temps
         return self.temps
+
+    def voltage(self, gpu):  # type: ignore[no-untyped-def]
+        if isinstance(self.volts, Exception):
+            raise self.volts
+        return self.volts
 
     def close(self) -> None:
         self.closed = True
@@ -191,6 +202,7 @@ def test_fan_rpm_falls_back_to_pynvml_for_the_first_fan() -> None:
 
 
 def test_real_nvapi_either_loads_or_refuses_cleanly() -> None:
+    from corewatch.sources import nvapi as nv
     from corewatch.sources.nvapi import NvApi
 
     try:
@@ -200,7 +212,21 @@ def test_real_nvapi_either_loads_or_refuses_cleanly() -> None:
     assert all(gpu.hotspot is None or 0 <= gpu.hotspot < 32 for gpu in nvapi.gpus)
     for gpu in nvapi.gpus:
         assert all(0 < value < 255 for value in nvapi.temperatures(gpu).values())
+        volts = nvapi.voltage(gpu)
+        assert volts is None or nv.VOLTS[0] <= volts <= nv.VOLTS[1]
     nvapi.close()
+
+
+def test_the_core_voltage_comes_from_nvapi_only_where_it_reads() -> None:
+    readings = {r.key: r for r in NvidiaSource(nvml=with_pci(fake_nvml()), nvapi=FakeNvApi({})).sample()}  # type: ignore[arg-type]
+    voltage = readings["nvidia/0/voltage"]
+    assert (voltage.label, voltage.kind, voltage.value) == ("Core voltage", Kind.VOLTAGE, 0.925)
+    no_voltage = NvidiaSource(nvml=with_pci(fake_nvml()), nvapi=FakeNvApi({}, volts=None))  # type: ignore[arg-type]
+    assert "nvidia/0/voltage" not in {r.key for r in no_voltage.sample()}
+    flaky = FakeNvApi({})
+    source = NvidiaSource(nvml=with_pci(fake_nvml()), nvapi=flaky)  # type: ignore[arg-type]
+    flaky.volts = RuntimeError("status -1")
+    assert {r.key: r.value for r in source.sample()}["nvidia/0/voltage"] is None  # kept, blank
 
 
 def test_every_reading_has_its_own_key() -> None:
@@ -208,7 +234,7 @@ def test_every_reading_has_its_own_key() -> None:
     readings = NvidiaSource(nvml=with_pci(fake_nvml(nvmlDeviceGetFanSpeedRPM=2320)), nvapi=nvapi).sample()  # type: ignore[arg-type]
     keys = [r.key for r in readings]
     assert len(keys) == len(set(keys)), keys  # a shared key would merge two sensors' statistics
-    assert {"nvidia/0/memory", "nvidia/0/temp/memory", "nvidia/0/temp/hotspot"} <= set(keys)
+    assert {"nvidia/0/memory", "nvidia/0/temp/memory", "nvidia/0/temp/hotspot", "nvidia/0/voltage"} <= set(keys)
 
 
 def test_fan_rpm_for_every_fan_through_pynvmls_request_structure() -> None:
