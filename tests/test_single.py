@@ -53,6 +53,23 @@ def test_a_start_during_the_first_ones_startup_waits_for_it(qtbot, tmp_path) -> 
     lock.release()  # type: ignore[union-attr]
 
 
+def test_a_start_during_the_first_ones_shutdown_takes_over_once_it_has_gone(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    app()
+    lock_path, socket_path = paths(tmp_path)
+    lock, _ = single.claim(lock_path, socket_path, show=True)  # first one, its server already closed
+    knocks: list[float] = []
+
+    def sleep(seconds: float) -> None:  # the first instance finishes shutting down while we wait
+        knocks.append(seconds)
+        if len(knocks) == 3:
+            lock.release()  # type: ignore[union-attr]
+
+    second, answered = single.claim(lock_path, socket_path, show=True, wait_seconds=5, sleep=sleep)
+    assert second is not None and not answered  # this start is the instance now
+    assert len(knocks) == 3  # kept knocking until the lock was let go, then took it at once
+    second.release()
+
+
 def test_a_holder_that_never_answers_still_means_no_second_copy(tmp_path) -> None:  # type: ignore[no-untyped-def]
     app()
     lock_path, socket_path = paths(tmp_path)

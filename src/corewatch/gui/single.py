@@ -79,9 +79,12 @@ def claim(
         return lock, False
     deadline = time.monotonic() + wait_seconds
     while not hand_off(socket_path, show):
+        # Not listening: still starting up, or shutting down, which ends with the lock let go.
+        if lock.acquire():
+            return lock, False
         if time.monotonic() >= deadline:
             return None, False
-        sleep(0.1)  # it's still starting up and not listening yet
+        sleep(0.1)
     return None, True
 
 
