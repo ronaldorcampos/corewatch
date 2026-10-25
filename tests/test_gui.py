@@ -1192,15 +1192,25 @@ def test_minimized_without_a_tray_opens_at_once_unless_starting_at_login(qtbot, 
     window.start(True, lambda: False, FakeTray, retry_ms=10, attempts=50)  # type: ignore[arg-type]
     assert window.isVisible()  # an ordinary launch never makes you wait
     assert not window.minimized_action.isEnabled()  # and the option says it needs a tray
+    assert not window.tray_action.isEnabled()  # so does staying in it: closing quits instead
+    assert window.tray_action.toolTip() == "Needs a system tray, and this desktop doesn't have one right now"
 
 
-def test_start_minimized_is_offered_once_a_tray_exists(qtbot, settings) -> None:  # type: ignore[no-untyped-def]
+def test_the_tray_options_are_offered_once_a_tray_exists(qtbot, settings, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    from PySide6.QtWidgets import QApplication
+
     ready = []
+    settings.setValue("close_to_tray", True)
     window = make_window(qtbot, settings, SCRIPT)
     window.start(False, lambda: bool(ready), FakeTray, retry_ms=10, attempts=50)  # type: ignore[arg-type]
-    assert not window.minimized_action.isEnabled()
+    assert not window.minimized_action.isEnabled() and not window.tray_action.isEnabled()
+    assert window.tray_action.isChecked()  # greyed out, but your setting is kept for when a tray comes
     ready.append(True)
     qtbot.waitUntil(window.minimized_action.isEnabled, timeout=2000)
+    assert window.tray_action.isEnabled() and window.tray_action.isChecked()
+    assert window.tray_action.toolTip().startswith("Closing this window leaves corewatch running in the tray")
+    monkeypatch.setattr(QApplication, "quit", lambda *a: None)
+    window.quit()  # really stop sampling: with a tray now, a close at teardown would only hide it
 
 
 def test_pinned_tray_tooltip_shows_min_max_and_average(qtbot, settings) -> None:  # type: ignore[no-untyped-def]

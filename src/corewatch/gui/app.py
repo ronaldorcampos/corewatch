@@ -156,6 +156,10 @@ class GridBackground(QWidget):
         painter.end()
 
 
+KEEP_RUNNING_TIP = "Closing this window leaves corewatch running in the tray; open it again from the tray icon"
+NO_TRAY_TIP = "Needs a system tray, and this desktop doesn't have one right now"
+
+
 def prefer_portal_theme(environ: MutableMapping[str, str]) -> None:
     """Have Qt follow GNOME's light or dark setting. There Qt's GTK theme reads it from the GTK
     theme's name, which stays "Adwaita" (light) when dark mode is on; the desktop portal's theme
@@ -651,6 +655,7 @@ class MainWindow(QMainWindow):
         self.tray_action = QAction("Keep running in the tray when closed", self)
         self.tray_action.setCheckable(True)
         self.tray_action.setChecked(self.close_to_tray)
+        self.tray_action.setToolTip(KEEP_RUNNING_TIP)
         self.tray_action.toggled.connect(self._set_close_to_tray)
         self.autostart_action = QAction("Start when I log in", self)
         self.autostart_action.setCheckable(True)
@@ -826,13 +831,16 @@ class MainWindow(QMainWindow):
         self._tray_timer.start(retry_ms)
 
     def _set_tray_options_available(self, available: bool) -> None:
-        """Starting minimized needs a tray to come back from; say so instead of silently failing."""
+        """Starting minimized and staying in the tray when closed both need a tray to come back
+        from; say so instead of silently doing nothing. Each keeps its setting for when one appears."""
         self.minimized_action.setEnabled(available)
         self.minimized_action.setToolTip(
             "Start without opening this window; double-click the tray icon to open it. Applies at login too."
             if available
-            else "Needs a system tray, and this desktop doesn't have one right now"
+            else NO_TRAY_TIP
         )
+        self.tray_action.setEnabled(available)
+        self.tray_action.setToolTip(KEEP_RUNNING_TIP if available else NO_TRAY_TIP)
 
     def set_show_host(self, show: bool) -> None:
         self.show_host = show

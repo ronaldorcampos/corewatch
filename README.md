@@ -263,9 +263,6 @@ To update to the latest version later:
 uv tool install --reinstall git+https://github.com/ronaldorcampos/corewatch
 ```
 
-The tray icon needs a system tray. On GNOME that means the AppIndicator extension, which Ubuntu
-ships enabled.
-
 ### From a clone
 
 To work on corewatch, or run your own changes:
@@ -279,6 +276,23 @@ uv tool install .
 `uv tool install` takes a snapshot of the code; after changing or pulling it, refresh with
 `uv tool install --reinstall .`. The launcher entry and icon are in `packaging/corewatch.desktop`
 and `src/corewatch/assets/corewatch.svg`.
+
+### The tray on GNOME
+
+The tray icon needs a system tray, and GNOME has one only with the AppIndicator extension. Ubuntu
+ships it enabled; Fedora (Asahi Remix included) doesn't. Without it, corewatch shows no icon,
+greys out **Keep running in the tray when closed** and **Start minimized in the tray**, and
+closing the window quits it. On Fedora, install the extension:
+
+```bash
+sudo dnf install gnome-shell-extension-appindicator
+```
+
+Log out and back in, since GNOME only finds a new extension when you log in, then turn it on:
+
+```bash
+gnome-extensions enable appindicatorsupport@rgcjonas.gmail.com
+```
 
 ## Usage
 
