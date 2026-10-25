@@ -39,8 +39,10 @@ MOTHERBOARD_DRIVERS = re.compile(
 SUPER_IO_NCT679X = re.compile(r"^nct679\d$")
 # An Apple Silicon Mac's System Management Controller (Asahi Linux): the board's temperatures,
 # power and fans. Its fans rest at 0 RPM until needed, below the slowest speed they run at,
-# which the driver reports as fan_min: a floor while running, not a warning.
+# which the driver reports as fan_min: a floor while running, not a warning. Its fanN_target is
+# the speed it asks of each: 0 while it has the fan off.
 APPLE_SMC = "macsmc_hwmon"
+FAN_OFF = "off, not needed"
 # Texas Instruments' speaker amplifier, one per speaker on Apple Silicon Macs.
 SPEAKER_AMPLIFIERS = {"tas2764", "tas2770"}
 
@@ -195,6 +197,7 @@ class ChannelInfo:
     empty_if_idle: bool = False
     integrated: bool = False  # an APU's graphics (see Reading.integrated)
     setpoint: bool = False  # a fan control that reads what was asked for (see Reading.setpoint)
+    target_file: str | None = None  # the speed a Mac's SMC asks of this fan, read each sample
 
 
 @dataclass(frozen=True)
@@ -503,6 +506,9 @@ class HwmonSource:
             empty_if_idle=kind is Kind.FAN and not context.gpu and context.name != APPLE_SMC,
             integrated=context.is_apu,
             setpoint=kind is Kind.FAN_DUTY and context.name in SETPOINT_DRIVERS,
+            target_file=f"{base}_target"
+            if kind is Kind.FAN and context.name == APPLE_SMC and (chip / f"{base}_target").exists()
+            else None,
         )
 
     def _friendly_label(self, label: str, kind: Kind, channel: Channel, context: ChipContext) -> str:
@@ -544,6 +550,8 @@ class HwmonSource:
         if info.ratio_of is not None:
             total = read_int(chip / info.ratio_of)
             value = raw * 100 / total if raw is not None and total else None
+        # Standing still because the SMC has it off, not because something's wrong.
+        resting = info.target_file is not None and value == 0 and read_int(chip / info.target_file) == 0
         unused = (
             info.kind is Kind.TEMPERATURE
             and device.startswith("Motherboard")
@@ -565,4 +573,5 @@ class HwmonSource:
             cap=info.cap,
             integrated=info.integrated,
             setpoint=info.setpoint,
+            detail=FAN_OFF if resting else "",
         )

@@ -388,3 +388,27 @@ def test_a_batterys_hwmon_mirror_is_left_to_the_battery_source(tmp_path: Path, p
     (tmp_path / "hwmon" / "hwmon2" / "device").symlink_to(supplies / "macsmc-battery")
     (tmp_path / "hwmon" / "hwmon5" / "device").symlink_to(supplies / "hid-mouse-battery")
     assert [r.device for r in source.sample()] == ["hid_mouse_battery"]  # a mouse's battery stays
+
+
+def test_a_mac_fan_the_smc_has_off_says_so(tmp_path: Path, proc_root: Path) -> None:
+    files = {
+        "hwmon1/name": "macsmc_hwmon",
+        "hwmon1/fan1_input": "0",
+        "hwmon1/fan1_target": "0",  # off
+        "hwmon1/fan2_input": "0",
+        "hwmon1/fan2_target": "1500",  # asked to start, not turning yet
+        "hwmon1/fan3_input": "1600",
+        "hwmon1/fan3_target": "1600",
+        "hwmon2/name": "nct6798",  # any other chip: a target file means nothing here
+        "hwmon2/fan1_input": "0",
+        "hwmon2/fan1_target": "0",
+    }
+    source = make_source(tmp_path, proc_root, files)
+    assert [(r.key.rpartition("/")[2], r.detail) for r in source.sample()] == [
+        ("fan1", "off, not needed"),
+        ("fan2", ""),
+        ("fan3", ""),
+        ("fan1", ""),
+    ]
+    write_tree(tmp_path / "hwmon", {"hwmon1/fan1_target": "1500"})  # read every sample: it turns on
+    assert source.sample()[0].detail == ""

@@ -2224,6 +2224,7 @@ def test_fan_view_pairs_each_fan_with_how_hard_it_is_driven() -> None:
         Row(_gathered("amd", "GPU · AMD", "GPU fan 1 (AMD)", Kind.FAN, 900.0)),
         Row(_gathered("free", "Motherboard · Z790", "Fan 3", Kind.FAN, 900.0), Stats(maximum=1800.0)),
         Row(_gathered("still", "Motherboard · Z790", "Fan 4", Kind.FAN, 0.0)),
+        Row(_gathered("mac", "Motherboard · MacBook Pro", "Fan 1", Kind.FAN, 0.0, detail="off, not needed")),
         Row(_gathered("unread", "Motherboard · Z790", "Fan 5", Kind.FAN, None)),
         # A driver that reports how hard a fan is driven but not its speed.
         Row(_gathered("only-pct", "GPU · GTX 1080", "GPU fan 2 speed", Kind.FAN_DUTY, 35.0)),
@@ -2233,13 +2234,14 @@ def test_fan_view_pairs_each_fan_with_how_hard_it_is_driven() -> None:
     view = FanView()
     view.set_data(_view_data(rows, labels={"mb": "Front intake"}))
     got = {i.key: (i.name, i.rpm, i.unit, i.share, i.where, i.spinning, i.driven) for i in view.items}  # type: ignore[attr-defined]
-    assert list(got) == ["mb", "rtx", "amd", "free", "still", "unread", "only-pct", "pump"]  # in order
+    assert list(got) == ["mb", "rtx", "amd", "free", "still", "mac", "unread", "only-pct", "pump"]  # in order
     assert got == {
         "mb": ("Front intake", "1,500", "RPM", 0.58, "board header · set to 58 %", True, True),  # renamed
         "rtx": ("GPU fan 1 (RTX 4070)", "2,320", "RPM", 0.73, "RTX 4070 · set to 73 %", True, True),
         "amd": ("GPU fan 1 (AMD)", "900", "RPM", 0.40, "AMD · set to 40 %", True, True),
         "free": ("Fan 3", "900", "RPM", 0.5, "board header", True, False),  # against its own fastest
         "still": ("Fan 4", "0", "RPM", 0.0, "board header", False, False),
+        "mac": ("Fan 1", "0", "RPM", 0.0, "board header · off, not needed", False, False),  # the SMC has it off
         "unread": ("Fan 5", "—", "RPM", None, "board header", False, False),
         "only-pct": ("GPU fan 2 speed", "35", "%", 0.35, "GTX 1080", True, True),
         "pump": ("Fan control 6", "100", "%", 1.0, "board header", True, True),

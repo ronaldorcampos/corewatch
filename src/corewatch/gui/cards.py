@@ -548,6 +548,8 @@ class FanView(CompactView):
             where = "board header" if origin.startswith("Motherboard") else origin.partition(" · ")[2] or origin
             if duty_value is not None:
                 where += f" · set to {duty_value:.0f} %"
+            if row.reading.detail:  # a Mac's fan the SMC has off: "off, not needed"
+                where += f" · {row.reading.detail}"
             name = _label(data, row)
             items.append(
                 FanItem(
