@@ -2420,6 +2420,21 @@ def test_a_readings_detail_is_on_its_line() -> None:
     assert limit_text(reading, False) == "Good · 413 cycles"
 
 
+def test_qt_follows_the_desktops_dark_mode_unless_told_otherwise() -> None:
+    from corewatch.gui.app import prefer_portal_theme
+
+    environ = {"XDG_CURRENT_DESKTOP": "ubuntu:GNOME"}
+    prefer_portal_theme(environ)
+    assert environ["QT_QPA_PLATFORMTHEME"] == "xdgdesktopportal"
+    chosen = {"XDG_CURRENT_DESKTOP": "GNOME", "QT_QPA_PLATFORMTHEME": "gtk3"}
+    prefer_portal_theme(chosen)
+    assert chosen["QT_QPA_PLATFORMTHEME"] == "gtk3"
+    for desktop in ("KDE", "sway", ""):  # left as they were: their portal may not answer
+        elsewhere = {"XDG_CURRENT_DESKTOP": desktop}
+        prefer_portal_theme(elsewhere)
+        assert "QT_QPA_PLATFORMTHEME" not in elsewhere
+
+
 def full_machine() -> list:  # type: ignore[type-arg]
     """``machine()`` plus the cards that open on a view of their own: fans, drives, a board."""
     from corewatch.model import Reading

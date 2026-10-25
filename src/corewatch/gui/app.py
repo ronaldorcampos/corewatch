@@ -7,7 +7,7 @@ import os
 import socket
 import sys
 import time
-from collections.abc import Callable
+from collections.abc import Callable, MutableMapping
 from dataclasses import replace
 from importlib.resources import files
 from pathlib import Path
@@ -154,6 +154,17 @@ class GridBackground(QWidget):
         painter = QPainter(self)
         themes.paint_grid(painter, QRectF(self.rect()), themes.current_theme())
         painter.end()
+
+
+def prefer_portal_theme(environ: MutableMapping[str, str]) -> None:
+    """Have Qt follow GNOME's light or dark setting. There Qt's GTK theme reads it from the GTK
+    theme's name, which stays "Adwaita" (light) when dark mode is on; the desktop portal's theme
+    reads the setting itself and leaves everything else to the theme Qt would have used. Only on
+    GNOME, whose portal always answers: the portal theme waits for its answer at start-up, and a
+    portal that can't answer (no backend for some window managers) would hold corewatch up until
+    D-Bus gives up. A theme you've chosen with QT_QPA_PLATFORMTHEME is kept."""
+    if "GNOME" in environ.get("XDG_CURRENT_DESKTOP", "").split(":"):
+        environ.setdefault("QT_QPA_PLATFORMTHEME", "xdgdesktopportal")
 
 
 def panel_is_light(desktop: str, scheme: Qt.ColorScheme) -> bool:
@@ -1602,6 +1613,7 @@ class MainWindow(QMainWindow):
 def run_gui(
     interval: float | None = None, fahrenheit: bool | None = None, minimized: bool = False, at_login: bool = False
 ) -> int:
+    prefer_portal_theme(os.environ)  # read when the QApplication starts
     # "corewatch" for argv[0]: started as python3 -m corewatch (the .deb), it would be __main__.py,
     # which X11 window managers would take as the app's name.
     app = QApplication(["corewatch", *sys.argv[1:]])
