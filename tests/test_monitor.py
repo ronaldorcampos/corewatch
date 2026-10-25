@@ -283,3 +283,22 @@ def test_a_stall_is_never_timed_across_a_gap_in_the_readings() -> None:
         rows = {row.reading.key: row.reading for row in monitor.sample()}
         seen.append(rows["fan"].stall_duty if "fan" in rows else "gone")
     assert seen == [None, None, None, None, "gone", "gone", None, 60.0]  # timed afresh from 41 s
+
+
+def test_a_transient_sensors_statistics_go_once_its_history_would_have() -> None:
+    from dataclasses import replace
+
+    from corewatch.model import HISTORY_SECONDS
+
+    program = replace(load("programs/make/cpu", "Battery · programs", 40.0), transient=True)
+    fixed = load("cpu-load", "CPU", 5.0)
+    clock = [0.0]
+    source = FakeSource("s", [[program, fixed], [fixed]])
+    monitor = Monitor([source], clock=lambda: clock[0])
+    monitor.sample()
+    clock[0] = HISTORY_SECONDS
+    monitor.sample()  # gone, but its chart still reaches back to it
+    assert "programs/make/cpu" in monitor._stats
+    clock[0] = HISTORY_SECONDS + 1
+    monitor.sample()
+    assert set(monitor._stats) == {"cpu-load"}  # gone for good; a fixed sensor is never dropped

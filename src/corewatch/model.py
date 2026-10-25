@@ -93,6 +93,9 @@ class Reading:
     # What the hardware says about the sensor in words rather than numbers: a battery's state
     # ("Discharging") or its condition and cycle count ("Good · 413 cycles"). Shown beside it.
     detail: str = ""
+    # Comes and goes by design, like a program in the top ten: once it's been gone as long as the
+    # history goes back, its statistics are dropped rather than kept for the rest of the session.
+    transient: bool = False
 
     @property
     def status(self) -> Status:

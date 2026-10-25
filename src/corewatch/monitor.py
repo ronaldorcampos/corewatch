@@ -5,7 +5,7 @@ import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, replace
 
-from corewatch.model import Kind, Reading, Row, Stats, Status
+from corewatch.model import HISTORY_SECONDS, Kind, Reading, Row, Stats, Status
 from corewatch.sources.base import Source
 from corewatch.typical import with_typical
 
@@ -74,6 +74,7 @@ class Monitor:
         self.running_keys: set[str] = set()
         self._errors: dict[str, str] = {}
         self._notes: list[str] = []
+        self._transient_seen: dict[str, float] = {}  # transient sensors, and when each last read
 
     def collect(self) -> Collected:
         """Read every source. Touches only the sources, never the statistics, so the GUI runs
@@ -109,6 +110,12 @@ class Monitor:
                 stats = self._stats.setdefault(reading.key, Stats())
                 stats.add(reading.value, collected.at, reading.status)
                 rows.append(Row(reading, stats))
+                if reading.transient:
+                    self._transient_seen[reading.key] = collected.at
+        for key, seen in list(self._transient_seen.items()):
+            if collected.at - seen > HISTORY_SECONDS:  # nothing of it left on any chart
+                del self._transient_seen[key]
+                self._stats.pop(key, None)
         return rows
 
     def _with_stalls(self, source: str, readings: Sequence[Reading], now: float) -> list[Reading]:

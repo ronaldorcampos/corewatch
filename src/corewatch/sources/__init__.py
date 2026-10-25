@@ -7,6 +7,7 @@ from corewatch.sources.hwmon import HwmonSource
 from corewatch.sources.intel_gpu import IntelGpuSource
 from corewatch.sources.network import NetworkSource
 from corewatch.sources.nvidia import NvidiaSource
+from corewatch.sources.programs import ProgramSource
 from corewatch.sources.rapl import RaplSource
 
 # CPU first, like Core Temp. Cards in the same group keep the order their first reading
@@ -20,6 +21,7 @@ DEFAULT_FACTORIES: list[Callable[[], Source]] = [
     IntelGpuSource,
     RaplSource,
     BatterySource,
+    ProgramSource,
     NetworkSource,
 ]
 
@@ -47,6 +49,7 @@ __all__ = [
     "IntelGpuSource",
     "NetworkSource",
     "NvidiaSource",
+    "ProgramSource",
     "RaplSource",
     "Source",
     "default_sources",

@@ -1,7 +1,8 @@
 """Each device card's compact view, shown before its full sensor list: a CPU's heat map and
 headline numbers, every fan's speed, each drive's temperature against its limit, the board's
-voltage rails, a network card's traffic, a battery's charge and health. And the deck that lays
-the cards out, two to a line where they fit."""
+voltage rails, a network card's traffic, a battery's charge and health, the programs using it most.
+And the deck that lays the cards out, two to a line
+where they fit."""
 
 import math
 import re
@@ -29,6 +30,8 @@ from corewatch.gui.theme import BODY_FONT, DISPLAY_FONT, MONO_FONT, Theme, curre
 from corewatch.gui.widgets import draw_sparkline
 from corewatch.model import Kind, Reading, Row, Status, format_value
 from corewatch.monitor import FANS, STORAGE, drive_name
+from corewatch.sources.programs import DEVICE as PROGRAMS
+from corewatch.sources.programs import WINDOW_SECONDS
 
 KEYBOARD_FOCUS = (Qt.FocusReason.TabFocusReason, Qt.FocusReason.BacktabFocusReason)
 # Voltage inputs a board chip reports without a name ("Voltage 9"): left to the full list.
@@ -140,12 +143,15 @@ class CompactView(CardView):
         if shape != self._shape:
             self._shape = shape
             self.updateGeometry()
-        # What's here, not the readings: a description that changed every tick would keep a
-        # screen reader busy. A tooltip is "name: value", so the name is what's before the last ": ".
-        description = "; ".join(item.tooltip.rpartition(": ")[0] for item in self.items if item.tooltip)
+        description = self.description()
         if description != self.accessibleDescription():
             self.setAccessibleDescription(description)
         self.update()
+
+    def description(self) -> str:
+        """What's here, not the readings: a description that changed every tick would keep a
+        screen reader busy. A tooltip is "name: value", so the name is what's before the last ": "."""
+        return "; ".join(item.tooltip.rpartition(": ")[0] for item in self.items if item.tooltip)
 
     def set_selected(self, key: str | None) -> None:
         if key != self.selected_key:
@@ -882,7 +888,7 @@ class NetworkView(CompactView):
         )
 
 
-# ----- battery -----------------------------------------------------------------------------
+# ----- battery and the programs using it ---------------------------------------------------
 
 
 @dataclass(frozen=True)
@@ -981,6 +987,52 @@ class BatteryView(BarListView):
         )
 
 
+def program_of(key: str) -> str:
+    """``programs/firefox/power`` -> ``firefox``."""
+    return key.removeprefix("programs/").rpartition("/")[0]
+
+
+class ProgramView(BarListView):
+    """The programs using the most CPU time while on battery, busiest first: each one's estimated
+    power, its share of the CPU, and a bar of that share against the busiest one's."""
+
+    ACCESSIBLE_NAME = "Programs using the battery"
+
+    def load(self, data: ViewData) -> list[Item]:
+        cpu: dict[str, Row] = {}
+        power: dict[str, Row] = {}
+        for row in data.rows:
+            (cpu if row.reading.kind is Kind.LOAD else power)[program_of(row.reading.key)] = row
+        busiest = max((row.reading.value or 0.0 for row in cpu.values()), default=0.0)
+        items: list[Item] = []
+        for program, share in sorted(cpu.items(), key=lambda pair: (-(pair[1].reading.value or 0.0), pair[0])):
+            watts = power.get(program)
+            # The program's own name, unless you've renamed its power row.
+            shown = _label(data, watts) if watts is not None else share.reading.label
+            name = program if watts is None or shown == watts.reading.label else shown
+            percent = share.reading.value
+            value = _value_text(watts, False) if watts is not None and watts.reading.value is not None else "—"
+            detail = f"{percent:.1f} % CPU" if percent is not None else ""
+            key = watts.reading.key if watts is not None else share.reading.key
+            fraction = (percent or 0.0) / busiest if busiest else None
+            items.append(BarItem(key, f"{name}: {value}, {detail}", name, value, fraction, detail))
+        return items
+
+    def description(self) -> str:
+        """The programs here in a fixed order: their ranking changes most seconds, and a screen
+        reader would announce each change."""
+        return "; ".join(sorted(item.title for item in self.items if isinstance(item, BarItem)))
+
+    def footer(self) -> str:
+        if not self.items:
+            return ""
+        estimated = any(row.reading.kind is Kind.POWER and row.reading.value is not None for row in self.data.rows)
+        seconds = f"{WINDOW_SECONDS:.0f} s"
+        if estimated:
+            return f"Power estimated from each one's share of CPU time · last {seconds}"
+        return f"Not on battery power: CPU share only · last {seconds}"
+
+
 # ----- which view, and how wide ------------------------------------------------------------
 
 
@@ -996,6 +1048,8 @@ def view_for(device: str) -> CardView | None:
         return RailView()
     if device.startswith("Network"):
         return NetworkView()
+    if device == PROGRAMS:
+        return ProgramView()
     if device == "Battery" or device.startswith("Battery · "):
         return BatteryView()
     return None

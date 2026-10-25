@@ -2380,6 +2380,38 @@ def test_battery_view_shows_charge_and_health_on_bars() -> None:
     assert isinstance(view_for("Battery"), BatteryView) and isinstance(view_for("Battery · BAT1"), BatteryView)
 
 
+def test_program_view_ranks_programs_and_says_the_watts_are_estimates() -> None:
+    from corewatch.gui.cards import ProgramView, view_for
+    from corewatch.sources.programs import DEVICE
+
+    def program(name: str, cpu: float, watts: float | None) -> list:  # type: ignore[type-arg]
+        return [
+            _reading(f"programs/{name}/cpu", DEVICE, f"{name} CPU", Kind.LOAD, cpu),
+            _reading(f"programs/{name}/power", DEVICE, f"{name} power (est.)", Kind.POWER, watts),
+        ]
+
+    view = ProgramView()
+    view.set_data(_view_data(_rows([*program("code", 2.5, 5.0), *program("firefox", 5.0, 10.0)])))
+    assert [(i.key, i.title, i.value, i.fraction, i.detail) for i in view.items] == [  # type: ignore[attr-defined]
+        ("programs/firefox/power", "firefox", "10.0 W", 1.0, "5.0 % CPU"),
+        ("programs/code/power", "code", "5.0 W", 0.5, "2.5 % CPU"),
+    ]
+    assert view.footer() == "Power estimated from each one's share of CPU time · last 10 s"
+    assert view.accessibleDescription() == "code; firefox"
+    renamed = _view_data(
+        _rows([*program("code", 2.5, 5.0), *program("firefox", 5.0, 10.0)]),
+        labels={"programs/firefox/power": "Browser", "programs/code/power": "code power (est.)"},
+    )
+    view.set_data(renamed)
+    assert [i.title for i in view.items] == ["Browser", "code"]  # type: ignore[attr-defined]
+    view.set_data(_view_data(_rows(program("firefox", 5.0, None))))  # plugged in
+    assert [i.value for i in view.items] == ["—"]  # type: ignore[attr-defined]
+    assert view.footer() == "Not on battery power: CPU share only · last 10 s"
+    view.set_data(_view_data([]))
+    assert view.footer() == "" and view.footer_height() == 0
+    assert isinstance(view_for(DEVICE), ProgramView)
+
+
 def test_a_readings_detail_is_on_its_line() -> None:
     from corewatch.gui.sensors import limit_text
     from corewatch.model import Reading
