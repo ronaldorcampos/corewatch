@@ -1,6 +1,6 @@
 [project]
 name = "corewatch"
-version = "0.1.2"
+version = "0.2.0"
 description = "A Core Temp-style hardware monitor for Linux: temperatures, fans, voltages, clocks and power in real time."
 authors = [
     { name = "Ronaldo Campos", email = "ronaldo.romanello@gmail.com" }
