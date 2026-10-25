@@ -1346,9 +1346,15 @@ class MainWindow(QMainWindow):
                 None,
             )
 
+        # headline falls back to the hottest sensor of all, which isn't the CPU's: a Mac's CPU has
+        # no temperature the kernel reports, and its tooltip mustn't call the Wi-Fi card's the CPU's.
+        cpu_temp = headline(self.plain_ordered)
+        if cpu_temp is not None and not cpu_temp.reading.device.startswith("CPU"):
+            cpu_temp = None
+        cpu_load = first("CPU", Kind.LOAD, "CPU load")
         lines = []
         for name, temp, load in (
-            ("CPU", headline(self.plain_ordered), first("CPU", Kind.LOAD, "CPU load")),
+            ("CPU", cpu_temp, cpu_load),
             ("GPU", first("GPU", Kind.TEMPERATURE), first("GPU", Kind.LOAD, "GPU load")),
         ):
             if temp is None:
@@ -1357,6 +1363,8 @@ class MainWindow(QMainWindow):
             if load is not None and load.reading.value is not None:
                 line += f" · {load.reading.value:.0f}% load"
             lines.append(line)
+        if cpu_temp is None and cpu_load is not None and cpu_load.reading.value is not None:
+            lines.insert(0, f"CPU {cpu_load.reading.value:.0f}% load")
         return lines
 
     def _tray_content(self, key: str) -> tuple[str, TrayLevel, str]:

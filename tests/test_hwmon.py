@@ -333,3 +333,35 @@ def test_a_thinkpads_fan_control_is_a_setpoint_and_a_boards_is_not(tmp_path: Pat
     )
     setpoints = {r.key: r.setpoint for r in source.sample() if r.kind is Kind.FAN_DUTY}
     assert setpoints == {"hwmon/thinkpad@hwmon5/pwm1": True, "hwmon/nct6798@hwmon8/pwm2": False}
+
+
+def test_apple_smc_is_the_macs_motherboard_and_its_resting_fans_are_fine(tmp_path: Path, proc_root: Path) -> None:
+    (proc_root / "device-tree").mkdir()
+    (proc_root / "device-tree" / "model").write_text("Apple MacBook Pro (16-inch, M1 Pro, 2021)\0")
+    files = {
+        "hwmon1/name": "macsmc_hwmon",
+        "hwmon1/fan1_input": "0",
+        "hwmon1/fan1_min": "1499",
+        "hwmon1/fan1_label": "Fan 1",
+        "hwmon1/temp1_input": "26863",
+        "hwmon1/temp1_label": "NAND Flash Temperature",
+    }
+    readings = {r.label: r for r in make_source(tmp_path, proc_root, files).sample()}
+    fan = readings["Fan 1"]
+    assert fan.device == "Motherboard · MacBook Pro (16-inch, M1 Pro, 2021)"
+    # Resting below its slowest running speed is not a warning, and it's a fan that exists.
+    assert (fan.low, fan.status.value, fan.empty_if_idle) == (None, "ok", False)
+    (proc_root / "device-tree" / "model").unlink()
+    source = make_source(tmp_path / "plain", proc_root, files)
+    assert {r.device for r in source.sample()} == {"Motherboard · Apple SMC"}
+
+
+def test_speaker_amplifiers_are_named(tmp_path: Path, proc_root: Path) -> None:
+    files = {
+        "hwmon8/name": "tas2764",
+        "hwmon8/temp1_input": "23000",
+        "hwmon9/name": "tas2770",  # the older Macs' amplifier
+        "hwmon9/temp1_input": "24000",
+    }
+    devices = [r.device for r in make_source(tmp_path, proc_root, files).sample()]
+    assert devices == ["Speaker amplifier", "Speaker amplifier (2)"]

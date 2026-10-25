@@ -71,7 +71,7 @@ class CpuSource:
             known = [load for load in loads if load is not None]
             readings.append(
                 Reading(
-                    key=f"cpu/load/{core.package}/{core.core_id}",
+                    key=f"cpu/load/{core.key}",
                     device=self.device,
                     label=f"{core.name} load",
                     kind=Kind.LOAD,
@@ -89,7 +89,7 @@ class CpuSource:
             known_tops = [top for top in tops if top]
             readings.append(
                 Reading(
-                    key=f"cpu/clock/{core.package}/{core.core_id}",
+                    key=f"cpu/clock/{core.key}",
                     device=self.device,
                     label=f"{core.name} clock",
                     kind=Kind.CLOCK,

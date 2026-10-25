@@ -990,6 +990,19 @@ def test_renaming_never_changes_what_the_tray_and_summary_track(qtbot, settings)
     assert window._summary() == ["CPU 50.0 °C · 5% load"]
 
 
+def test_the_summary_never_calls_another_devices_temperature_the_cpus(qtbot, settings) -> None:  # type: ignore[no-untyped-def]
+    """A Mac's CPU reports no temperature: its load still shows, and the Wi-Fi card's isn't the CPU's."""
+    script = [
+        [
+            temp("wifi", "Motherboard · MacBook Pro", 36.0, label="WiFi/BT Module Temp"),
+            load("cpu-load", "CPU · Apple M1 Pro", 9.0, label="CPU load (all cores)"),
+        ]
+    ]
+    window = make_window(qtbot, settings, script)
+    window.refresh()
+    assert window._summary() == ["CPU 9% load"]
+
+
 def test_a_vanished_pinned_sensor_can_be_unpinned_from_its_icon(qtbot, settings) -> None:  # type: ignore[no-untyped-def]
     script = [SCRIPT[0], [temp("pkg", "CPU · i7", 50.0, label="CPU package")]]  # "gpu" stops reporting
     window = make_window(qtbot, settings, script)

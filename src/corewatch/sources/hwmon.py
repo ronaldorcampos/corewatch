@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from corewatch.model import Kind, Reading
-from corewatch.sources.base import cpu_device_name, discover_cores, read_int, read_text
+from corewatch.sources.base import cpu_device_name, discover_cores, machine_model, read_int, read_text
 
 # sysfs prefix -> (kind, divisor to reach the display unit, default label)
 CHANNEL_TYPES = {
@@ -37,6 +37,12 @@ MOTHERBOARD_DRIVERS = re.compile(
 )
 
 SUPER_IO_NCT679X = re.compile(r"^nct679\d$")
+# An Apple Silicon Mac's System Management Controller (Asahi Linux): the board's temperatures,
+# power and fans. Its fans rest at 0 RPM until needed, below the slowest speed they run at,
+# which the driver reports as fan_min: a floor while running, not a warning.
+APPLE_SMC = "macsmc_hwmon"
+# Texas Instruments' speaker amplifier, one per speaker on Apple Silicon Macs.
+SPEAKER_AMPLIFIERS = {"tas2764", "tas2770"}
 
 # Nuvoton NCT679x chips wire these voltage inputs internally, identically on every board.
 # The driver already applies the internal scaling. Values are (label, multiplier).
@@ -385,6 +391,11 @@ class HwmonSource:
         if MOTHERBOARD_DRIVERS.match(name):
             board = read_text(self.dmi_root / "board_name")
             return f"Motherboard · {board}" if board else f"Motherboard · {name}"
+        if name == APPLE_SMC:
+            model = (machine_model(self.proc_root) or "").removeprefix("Apple ")
+            return f"Motherboard · {model}" if model else "Motherboard · Apple SMC"
+        if name in SPEAKER_AMPLIFIERS:
+            return "Speaker amplifier"
         if name == "amdgpu":
             model = read_text(device / "product_name") or pci_name(
                 read_text(device / "vendor") or "", read_text(device / "device") or "", self.pci_ids
@@ -402,7 +413,9 @@ class HwmonSource:
     def _core_name(self, chip: Path, core_id: int) -> str | None:
         """coretemp's "Core 32" uses the hardware core ID; show the same name as load and clock rows."""
         if self._core_names is None:
-            self._core_names = {(c.package, c.core_id): c.name for c in discover_cores(self.sys_cpu)}
+            # coretemp is x86's, where core IDs are unique in a package (no cluster needed).
+            cores = discover_cores(self.sys_cpu)
+            self._core_names = {(c.package, c.core_id): c.name for c in cores if c.cluster is None}
         device = (chip / "device").resolve().name  # coretemp.<package>
         package = int(device.rpartition(".")[2]) if device.rpartition(".")[2].isdigit() else 0
         return self._core_names.get((package, core_id))
@@ -464,7 +477,7 @@ class HwmonSource:
                 low = None
         elif kind is Kind.FAN:
             fan_min = limit("min")
-            low = fan_min if fan_min else None
+            low = fan_min if fan_min and context.name != APPLE_SMC else None
         elif kind is Kind.POWER:
             power_cap = limit("cap")
             if not power_cap and context.name in INTEL_GPU_DRIVERS:
@@ -481,9 +494,9 @@ class HwmonSource:
             crit=crit,
             companion=f"hwmon/{chip_id}/fan{channel.number}" if kind is Kind.FAN_DUTY else None,
             cap=cap,
-            # Any fan header may have nothing plugged in, except a graphics card's own fans,
-            # which exist even while resting at 0 RPM.
-            empty_if_idle=kind is Kind.FAN and not context.gpu,
+            # Any fan header may have nothing plugged in, except a graphics card's or a Mac's
+            # own fans, which exist even while resting at 0 RPM.
+            empty_if_idle=kind is Kind.FAN and not context.gpu and context.name != APPLE_SMC,
             integrated=context.is_apu,
             setpoint=kind is Kind.FAN_DUTY and context.name in SETPOINT_DRIVERS,
         )

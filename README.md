@@ -106,7 +106,7 @@ load and power reading your machine exposes, refreshes them at an interval you c
   going back.
   Esc or **Back** goes back, and so does typing in the filter.
 - **Readable names.** Intel hybrid CPUs show P-core 0-7 and E-core 0-7 instead of the kernel's
-  gappy core IDs. Nuvoton motherboard chips get named voltage rails (Vcore, +12V, +5V, +3.3V, ...).
+  gappy core IDs, and an M1 Pro's cores read E-core 0-1 and P-core 0-7. Nuvoton motherboard chips get named voltage rails (Vcore, +12V, +5V, +3.3V, ...).
   Right-click any sensor and choose **Rename…** to give it your own name (handy for "Fan 2" →
   "CPU fan"); **Reset name** undoes it.
 - **Tray icon.** corewatch's logo sits in the tray, in one colour like the desktop's own icons
@@ -149,7 +149,8 @@ load and power reading your machine exposes, refreshes them at an interval you c
 | Kernel hwmon (`/sys/class/hwmon`) | Intel CPU package and per-core temperatures (`coretemp`), motherboard temperatures, fans, fan control, voltages, NVMe and network card temperatures, and anything else a driver publishes |
 | AMD CPUs (`k10temp`, optional `zenpower`) | CPU temperature (the real die temperature, plus the fan-control value where the chip reports both) and one temperature per chiplet (CCD); AMD reports no per-core temperatures. With `zenpower` (Zen 1-3), core and SoC voltages, currents and power |
 | AMD GPUs (`amdgpu`) | GPU, hotspot and memory temperatures (warning at the throttle point, critical at shutdown), fan speed (RPM and %), core voltage, graphics and memory clocks, power draw against its cap, load and video memory, under the card's model name |
-| `/proc/stat`, cpufreq | Load and clock speed per physical core, with each core's top clock from the hardware |
+| `/proc/stat`, cpufreq | Load and clock speed per physical core, with each core's top clock from the hardware. On ARM chips with two kinds of core (Apple's M chips among them), the cores the kernel rates less capable are named E-cores and the rest P-cores |
+| Apple Silicon Macs (Asahi Linux: `macsmc_hwmon`) | The board's temperatures, power readings, fans and voltages, under the Mac's name, and the speaker amplifiers' temperatures. The fans rest at 0 RPM until needed, which isn't a warning. The kernel reports no CPU temperature on these Macs, so there's no CPU temperature gauge or core heat map |
 | RAPL (`/sys/class/powercap`) | CPU package and core power draw on Intel and AMD Zen, and Intel integrated graphics power (needs one permission tweak, see below). The package's power limit (the higher of its sustained and boost limits, as the firmware or a power profile sets them) is shown for reference, not as a warning |
 | Intel graphics (`i915`, `xe`) | Graphics clock and active time (the share of time it isn't asleep) for integrated graphics and Arc cards. **Integrated:** power draw from RAPL; it has no temperature sensor of its own, so its heat shows in the CPU package temperature, and if it's switched off in the BIOS only its power draw appears, under the CPU. **Arc:** power draw against its limit and core voltage, plus fan speeds and GPU and memory temperatures where the kernel reports them (fans from about Linux 6.12, temperatures on Battlemage with `xe`). corewatch never keeps an idle Intel GPU awake: while nothing is using it, it shows 0 MHz and 0 % without reading it, and an Arc card's sensors stay blank until it's in use |
 | NVIDIA NVML | GPU temperature, fan speeds (RPM and %), power draw (the power limit is shown for reference, not as a warning), graphics and memory clocks (with the card's top clock for each), load, video memory |
