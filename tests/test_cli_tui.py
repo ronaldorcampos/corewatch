@@ -66,6 +66,7 @@ def test_json_dump() -> None:
         "min": 57.0,
         "max": 57.0,
         "cap": None,
+        "detail": "",
         "unused": False,
     }
     assert "·" in out.getvalue()  # not escaped to ·
@@ -191,3 +192,21 @@ async def test_tui_gathers_fans_into_one_group() -> None:
 def test_minimized_flag() -> None:
     assert build_parser().parse_args(["--minimized"]).minimized is True
     assert build_parser().parse_args([]).minimized is False
+
+
+def test_dump_shows_what_the_hardware_says_in_words() -> None:
+    from corewatch.model import Kind, Reading, Row
+
+    rows = [
+        Row(Reading("c", "Battery", "Charge", Kind.LOAD, 70.0, detail="Discharging")),
+        Row(Reading("v", "Battery", "Voltage", Kind.VOLTAGE, 11.6, low=9.0, high=13.0, detail="nominal")),
+    ]
+    out = io.StringIO()
+    write_dump(rows, [], out, as_json=False, fahrenheit=False)
+    assert out.getvalue().splitlines()[1:3] == [
+        "  Charge           70 %  Discharging",
+        "  Voltage      11.600 V  min 9.000 V · max 13.000 V · nominal",
+    ]
+    out = io.StringIO()
+    write_dump(rows, [], out, as_json=True, fahrenheit=False)
+    assert '"detail": "Discharging"' in out.getvalue()

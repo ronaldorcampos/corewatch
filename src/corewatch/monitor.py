@@ -22,7 +22,7 @@ KIND_ORDER = [
     Kind.THROUGHPUT,
 ]
 # Devices are listed by these name prefixes; anything else goes last, in discovery order.
-DEVICE_ORDER = ["CPU", "Fans", "GPU", "Motherboard", "Memory", "NVMe", "Disk", "Network", "Wi-Fi"]
+DEVICE_ORDER = ["CPU", "Fans", "GPU", "Motherboard", "Battery", "Memory", "NVMe", "Disk", "Network", "Wi-Fi"]
 FANS = "Fans"
 STORAGE = "Storage"
 STORAGE_PREFIXES = ("NVMe", "Disk")

@@ -69,6 +69,8 @@ def limit_text(reading: Reading, fahrenheit: bool) -> str:
     """A sensor's limits as its row and tooltip name them, e.g. ``warns at 80.0 °C · critical at
     100.0 °C``, or ``max clock 5,300 MHz``; a stalled fan says so first."""
     f, parts = fahrenheit, [stall] if (stall := format_stall(reading)) else []
+    if reading.detail:  # what the hardware says in words: "Discharging", "Good · 413 cycles"
+        parts.append(reading.detail)
     if reading.high is not None:
         parts.append(f"warns at {format_value(reading.kind, reading.high, f)}")
     if reading.crit is not None:

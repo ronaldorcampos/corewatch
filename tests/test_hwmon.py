@@ -365,3 +365,26 @@ def test_speaker_amplifiers_are_named(tmp_path: Path, proc_root: Path) -> None:
     }
     devices = [r.device for r in make_source(tmp_path, proc_root, files).sample()]
     assert devices == ["Speaker amplifier", "Speaker amplifier (2)"]
+
+
+def test_a_batterys_hwmon_mirror_is_left_to_the_battery_source(tmp_path: Path, proc_root: Path) -> None:
+    supplies = tmp_path / "smc" / "power_supply"
+    write_tree(
+        supplies,
+        {
+            "macsmc-battery/type": "Battery",
+            "macsmc-battery/scope": "System",
+            "hid-mouse-battery/type": "Battery",
+            "hid-mouse-battery/scope": "Device",
+        },
+    )
+    files = {
+        "hwmon2/name": "macsmc_battery",
+        "hwmon2/temp1_input": "26400",
+        "hwmon5/name": "hid_mouse_battery",
+        "hwmon5/in0_input": "3900",
+    }
+    source = make_source(tmp_path, proc_root, files)
+    (tmp_path / "hwmon" / "hwmon2" / "device").symlink_to(supplies / "macsmc-battery")
+    (tmp_path / "hwmon" / "hwmon5" / "device").symlink_to(supplies / "hid-mouse-battery")
+    assert [r.device for r in source.sample()] == ["hid_mouse_battery"]  # a mouse's battery stays

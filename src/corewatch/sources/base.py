@@ -84,6 +84,16 @@ def machine_model(proc_root: Path = Path("/proc")) -> str | None:
     return model or None
 
 
+def is_battery(device: Path) -> bool:
+    """Whether a sysfs device is the machine's own battery in the power supply class: not a
+    mouse's or a keyboard's, which the kernel scopes to their device."""
+    return (
+        device.resolve().parent.name == "power_supply"
+        and read_text(device / "type") == "Battery"
+        and read_text(device / "scope") != "Device"
+    )
+
+
 def cpu_device_name(proc_root: Path = Path("/proc")) -> str:
     model = cpu_model_name(proc_root)
     return f"CPU · {model}" if model else "CPU"

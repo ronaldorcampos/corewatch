@@ -53,6 +53,8 @@ def test_group_rows_orders_devices_and_kinds() -> None:
                 temp("disk", "NVMe nvme0 · Samsung", 40.0),
                 load("cpu-load", "CPU · i7", 5.0),
                 temp("weird", "spd5118-ish", 30.0),
+                temp("battery", "Battery", 27.0),
+                temp("board", "Motherboard · X", 30.0),
                 temp("gpu", "GPU · RTX", 41.0),
                 temp("cpu-temp", "CPU · i7", 57.0),
             ]
@@ -62,6 +64,8 @@ def test_group_rows_orders_devices_and_kinds() -> None:
     assert [(device, [r.reading.key for r in rows]) for device, rows in groups] == [
         ("CPU · i7", ["cpu-temp", "cpu-load"]),
         ("GPU · RTX", ["gpu"]),
+        ("Motherboard · X", ["board"]),
+        ("Battery", ["battery"]),  # after the board, before the drives
         ("NVMe nvme0 · Samsung", ["disk"]),
         ("spd5118-ish", ["weird"]),
     ]

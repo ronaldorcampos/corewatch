@@ -90,6 +90,9 @@ class Reading:
     # From graphics built into the CPU (Intel integrated graphics, an AMD APU). Its power is part
     # of the CPU's package power, or on an APU covers the whole chip: never add the two together.
     integrated: bool = False
+    # What the hardware says about the sensor in words rather than numbers: a battery's state
+    # ("Discharging") or its condition and cycle count ("Good · 413 cycles"). Shown beside it.
+    detail: str = ""
 
     @property
     def status(self) -> Status:

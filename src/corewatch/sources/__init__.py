@@ -1,6 +1,7 @@
 from collections.abc import Callable
 
 from corewatch.sources.base import Source
+from corewatch.sources.battery import BatterySource
 from corewatch.sources.cpu import CpuSource
 from corewatch.sources.hwmon import HwmonSource
 from corewatch.sources.intel_gpu import IntelGpuSource
@@ -18,6 +19,7 @@ DEFAULT_FACTORIES: list[Callable[[], Source]] = [
     NvidiaSource,
     IntelGpuSource,
     RaplSource,
+    BatterySource,
     NetworkSource,
 ]
 
@@ -39,6 +41,7 @@ def default_sources(factories: list[Callable[[], Source]] | None = None) -> list
 
 __all__ = [
     "DEFAULT_FACTORIES",
+    "BatterySource",
     "CpuSource",
     "HwmonSource",
     "IntelGpuSource",

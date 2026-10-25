@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from corewatch.model import Kind, Reading
-from corewatch.sources.base import cpu_device_name, discover_cores, machine_model, read_int, read_text
+from corewatch.sources.base import cpu_device_name, discover_cores, is_battery, machine_model, read_int, read_text
 
 # sysfs prefix -> (kind, divisor to reach the display unit, default label)
 CHANNEL_TYPES = {
@@ -279,8 +279,12 @@ class HwmonSource:
     def _describe_chip(self, chip: Path, now: float) -> ChipInfo:
         chip_id = self._chip_id(chip)
         name = read_text(chip / "name") or ""
-        profile = self._voltage_profile(name)
         device = self._device_name(chip)
+        if is_battery(chip / "device"):
+            # The power supply class mirrors a battery's readings here; the battery source reads
+            # them, with its charge, from the battery itself.
+            return ChipInfo(device, [], now)
+        profile = self._voltage_profile(name)
         found = self._channels(chip)
         labels = {read_text(chip / f"{c.prefix}{c.number}_label") for c in found}
         context = ChipContext(

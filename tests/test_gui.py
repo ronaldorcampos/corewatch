@@ -2358,6 +2358,36 @@ def test_network_view_shows_traffic_and_its_temperatures() -> None:
     assert view.heightForWidth(400) < with_footer
 
 
+def test_battery_view_shows_charge_and_health_on_bars() -> None:
+    from corewatch.gui.cards import BatteryView, view_for
+
+    rows = _rows(
+        [
+            temp("t", "Battery", 27.6, label="Temperature"),
+            _reading("c", "Battery", "Charge", Kind.LOAD, 70.0, detail="Discharging"),
+            _reading("h", "Battery", "Health", Kind.LOAD, 82.0, detail="Good · 413 cycles"),
+            _reading("p", "Battery", "Power", Kind.POWER, 15.9),
+            _reading("v", "Battery", "Voltage", Kind.VOLTAGE, 11.6),
+        ]
+    )
+    view = BatteryView()
+    view.set_data(_view_data(rows))
+    assert [(i.key, i.value, i.fraction, i.detail) for i in view.items] == [  # type: ignore[attr-defined]
+        ("c", "70 %", 0.7, "Discharging"),
+        ("h", "82 %", 0.82, "Good · 413 cycles"),
+    ]
+    assert view.footer() == "Temperature 27.6 °C · Power 15.9 W"
+    assert isinstance(view_for("Battery"), BatteryView) and isinstance(view_for("Battery · BAT1"), BatteryView)
+
+
+def test_a_readings_detail_is_on_its_line() -> None:
+    from corewatch.gui.sensors import limit_text
+    from corewatch.model import Reading
+
+    reading = Reading("h", "Battery", "Health", Kind.LOAD, 82.0, detail="Good · 413 cycles")
+    assert limit_text(reading, False) == "Good · 413 cycles"
+
+
 def full_machine() -> list:  # type: ignore[type-arg]
     """``machine()`` plus the cards that open on a view of their own: fans, drives, a board."""
     from corewatch.model import Reading

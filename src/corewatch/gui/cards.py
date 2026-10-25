@@ -1,7 +1,7 @@
 """Each device card's compact view, shown before its full sensor list: a CPU's heat map and
 headline numbers, every fan's speed, each drive's temperature against its limit, the board's
-voltage rails, a network card's traffic. And the deck that lays the cards out, two to a line
-where they fit."""
+voltage rails, a network card's traffic, a battery's charge and health. And the deck that lays
+the cards out, two to a line where they fit."""
 
 import math
 import re
@@ -882,6 +882,105 @@ class NetworkView(CompactView):
         )
 
 
+# ----- battery -----------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class BarItem(Item):
+    """A name and value over a bar, with a line under it."""
+
+    title: str = ""
+    value: str = ""
+    fraction: float | None = None  # of the bar, 0-1; None leaves it empty
+    detail: str = ""
+
+
+class BarListView(CompactView):
+    """A list of ``BarItem`` rows, drawn like the Storage card's, with a line of text under them."""
+
+    ROW_H = 62
+
+    def place(self, width: int) -> list[QRectF]:
+        height = max(px(self.ROW_H), self._text_height() + px(14))
+        return [QRectF(0, i * height, width, height) for i in range(len(self.items))]
+
+    @staticmethod
+    def _fonts() -> tuple[QFont, QFont, QFont]:
+        return font(BODY_FONT, 14), font(MONO_FONT, 14, QFont.Weight.Bold), font(BODY_FONT, 12)
+
+    def _text_height(self) -> int:
+        name, _, sub = self._fonts()
+        return QFontMetrics(name).height() + px(14) + QFontMetrics(sub).height()
+
+    def footer(self) -> str:
+        return ""
+
+    def footer_height(self) -> int:
+        return QFontMetrics(font(BODY_FONT, 12)).height() + px(8) if self.footer() else 0
+
+    def paint_item(self, painter: QPainter, rect: QRectF, item: Item, theme: Theme) -> None:
+        assert isinstance(item, BarItem)
+        name_font, value_font, sub_font = self._fonts()
+        x, width = rect.left() + px(10), rect.width() - px(20)
+        name_h, sub_h = QFontMetrics(name_font).height(), QFontMetrics(sub_font).height()
+        top = rect.top() + (rect.height() - (name_h + px(14) + sub_h)) / 2
+        value_w = QFontMetrics(value_font).horizontalAdvance(item.value)
+        room = width - value_w - px(12)
+        draw_text(painter, QRectF(x, top, room, name_h), item.title, name_font, theme.text, Qt.AlignmentFlag.AlignLeft)
+        draw_text(
+            painter, QRectF(x, top, width, name_h), item.value, value_font, theme.text, Qt.AlignmentFlag.AlignRight
+        )
+        bar = QRectF(x, top + name_h + px(5), width, px(5))
+        painter.fillRect(bar, QColor(theme.edge))
+        if item.fraction is not None:
+            filled = bar.width() * min(max(item.fraction, 0.0), 1.0)
+            painter.fillRect(QRectF(bar.left(), bar.top(), filled, bar.height()), QColor(theme.accent))
+        draw_text(
+            painter,
+            QRectF(x, bar.bottom() + px(4), width, sub_h),
+            item.detail,
+            sub_font,
+            theme.muted,
+            Qt.AlignmentFlag.AlignLeft,
+        )
+
+    def paint_footer(self, painter: QPainter, rect: QRectF, theme: Theme) -> None:
+        draw_text(
+            painter,
+            rect.adjusted(px(10), px(4), -px(10), 0),
+            self.footer(),
+            font(BODY_FONT, 12),
+            theme.muted,
+            Qt.AlignmentFlag.AlignLeft,
+        )
+
+
+def _percent(row: Row, data: ViewData) -> BarItem:
+    reading, name = row.reading, _label(data, row)
+    value = _value_text(row, False)
+    fraction = reading.value / 100 if reading.value is not None else None
+    return BarItem(reading.key, f"{name}: {value}", name, value, fraction, reading.detail)
+
+
+class BatteryView(BarListView):
+    """The battery's charge (with whether it's charging) and health (with its condition and
+    cycle count) on bars; its power and temperature under them."""
+
+    ACCESSIBLE_NAME = "Battery"
+    SHOWN = ("Charge", "Health")
+
+    def load(self, data: ViewData) -> list[Item]:
+        rows = {row.reading.label: row for row in data.rows}
+        return [_percent(rows[label], data) for label in self.SHOWN if label in rows]
+
+    def footer(self) -> str:
+        return " · ".join(
+            f"{_label(self.data, row)} {_value_text(row, self.data.fahrenheit)}"
+            for row in self.data.rows
+            if row.reading.label in ("Power", "Temperature")
+        )
+
+
 # ----- which view, and how wide ------------------------------------------------------------
 
 
@@ -897,6 +996,8 @@ def view_for(device: str) -> CardView | None:
         return RailView()
     if device.startswith("Network"):
         return NetworkView()
+    if device == "Battery" or device.startswith("Battery · "):
+        return BatteryView()
     return None
 
 
@@ -906,7 +1007,7 @@ def is_wide(device: str) -> bool:
 
 
 # Cards in the order the deck shows them: the wide ones first, then the half-width ones.
-CARD_ORDER = ("CPU", "GPU", FANS, STORAGE, "Motherboard", "Network", "Memory", "Wi-Fi")
+CARD_ORDER = ("CPU", "GPU", FANS, STORAGE, "Motherboard", "Battery", "Network", "Memory", "Wi-Fi")
 
 
 def card_rank(device: str) -> int:

@@ -86,3 +86,10 @@ def test_typical_limits_say_they_are_typical() -> None:
     assert format_typical(hot) == "typical up to 94.0 °C"
     assert format_typical(hot, fahrenheit=True) == "typical up to 201.2 °F"
     assert format_typical(Reading("f", BOARD, "Fan 2", Kind.FAN, 900.0)) == ""
+
+
+def test_a_batterys_health_gets_no_typical_full() -> None:
+    health = Reading("battery/BAT0/health", "Battery", "Health", Kind.LOAD, 82.0)
+    charge = Reading("battery/BAT0/charge", "Battery", "Charge", Kind.LOAD, 78.0)
+    filled = {r.label: (r.typical_low, r.typical_high) for r in with_typical([health, charge])}
+    assert filled == {"Health": (None, None), "Charge": (None, 100.0)}

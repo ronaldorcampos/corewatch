@@ -63,6 +63,7 @@ def row_to_dict(row: Row, unused: bool = False) -> dict[str, object]:
         "status": reading.status.value,
         "min": stats.minimum,
         "max": stats.maximum,
+        "detail": reading.detail,
         "unused": unused,
     }
 
@@ -90,7 +91,7 @@ def write_dump(
         width = max(len(r.reading.label) for r in device_rows)
         for row in device_rows:
             value = format_value(row.reading.kind, row.reading.value, fahrenheit)
-            limit = format_limit(row.reading, fahrenheit)
+            limit = " · ".join(part for part in (format_limit(row.reading, fahrenheit), row.reading.detail) if part)
             out.write(f"  {row.reading.label:<{width}}  {value:>12}  {limit}".rstrip() + "\n")
         out.write("\n")
     for note in notes:

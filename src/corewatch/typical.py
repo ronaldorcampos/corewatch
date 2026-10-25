@@ -36,6 +36,8 @@ def with_typical(readings: Sequence[Reading]) -> list[Reading]:
 
 
 def typical_limits(reading: Reading, siblings: Sequence[Reading]) -> tuple[float | None, float | None]:
+    if (reading.device.startswith("Battery"), reading.label) == (True, "Health"):
+        return None, None  # what a battery holds against new: it only wears, never fills back up
     if reading.kind in (Kind.LOAD, Kind.FAN_DUTY):
         return None, FULL
     rail = RAILS.get(reading.label.casefold().removesuffix(" voltage"))
