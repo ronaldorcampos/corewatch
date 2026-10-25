@@ -210,3 +210,21 @@ def test_dump_shows_what_the_hardware_says_in_words() -> None:
     out = io.StringIO()
     write_dump(rows, [], out, as_json=True, fahrenheit=False)
     assert '"detail": "Discharging"' in out.getvalue()
+
+
+async def test_tui_keeps_where_you_scrolled_when_the_order_changes() -> None:
+    """The programs card's ranking changes most seconds, rebuilding the table: a scrolled view
+    stays put instead of jumping back to the cursor."""
+    many = [temp(f"s{n:02}", "CPU", 40.0 + n) for n in range(60)]
+    reordered = [*many[30:], *many[:30]]  # same sensors, another order: a rebuild
+    app = CorewatchApp(Monitor([FakeSource("s", [many, reordered])]), interval=60)
+    async with app.run_test(size=(100, 20)) as pilot:
+        table = app.query_one(DataTable)
+        await pilot.pause()  # laid out, so it can scroll
+        table.scroll_to(y=25, animate=False, immediate=True)
+        await pilot.pause()
+        assert table.scroll_y == 25 and table.cursor_row == 0  # scrolled away from the cursor
+        app.refresh_readings()
+        await pilot.pause()
+        assert table.scroll_y == 25
+        assert cell_texts(table)[1][0] == "  s30"  # it was rebuilt

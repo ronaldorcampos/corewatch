@@ -103,6 +103,9 @@ class CorewatchApp(App[None]):
             cursor = table.cursor_row
             # Keep the cursor on the same sensor, not the same row number.
             current_key = self._layout[cursor] if 0 <= cursor < len(self._layout) else None
+            # clear() scrolls to the top; a rebuild (the programs card's ranking changes most
+            # seconds) must leave the view where you scrolled it.
+            scrolled = table.scroll_y
             table.clear()
             for device, device_rows in groups:
                 table.add_row(Text(device, style="bold"), *[""] * (len(COLUMNS) - 1), key=f"device:{device}")
@@ -117,7 +120,8 @@ class CorewatchApp(App[None]):
             self._layout = layout
             if table.row_count:
                 target = layout.index(current_key) if current_key in layout else min(cursor, table.row_count - 1)
-                table.move_cursor(row=target)
+                table.move_cursor(row=target, scroll=False)
+                table.scroll_to(y=scrolled, animate=False)
             return
         for _, device_rows in groups:
             for row in device_rows:
